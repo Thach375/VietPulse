@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Thach375/VietPulse/contracts/envelope.schema.json",
+  "title": "VietPulse Kafka envelope",
+  "description": "Envelope chung cho mọi bản ghi trong Kafka. Key Kafka = '<source>:<record_id>'. Mọi thời gian là UTC.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "record_id", "event_time", "ingest_time", "schema_version", "payload"],
+  "properties": {
+    "source": {
+      "enum": ["news_article", "news_comment", "voz_post", "youtube_comment"]
+    },
+    "record_id": {
+      "description": "Id gốc ở nguồn, có tiền tố trang để không trùng giữa các trang, ví dụ 'vnexpress:5133904'.",
+      "type": "string",
+      "minLength": 1
+    },
+    "event_time": {
+      "description": "Thời điểm bài hoặc bình luận được viết.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "ingest_time": {
+      "description": "Thời điểm crawler lấy về.",
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"
+    },
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "payload": {
+      "description": "Trường riêng của từng nguồn.",
+      "type": "object"
+    }
+  }
+}

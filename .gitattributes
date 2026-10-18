@@ -1,0 +1,5 @@
+* text=auto
+# File chạy trong container Linux phải giữ LF, kể cả khi checkout trên Windows.
+*.sh text eol=lf
+*.conf text eol=lf
+Dockerfile text eol=lf

@@ -1,6 +1,6 @@
 # VietPulse: Plan and Tracker
 
-> Cập nhật lần cuối: 11/10/2026 · Trưởng nhóm: Thái · Thành viên: Thái, Thạch, Thắng, Quang, Đạt
+> Cập nhật lần cuối: 18/10/2026 · Trưởng nhóm: Thái · Thành viên: Thái, Thạch, Thắng, Quang, Đạt
 
 Tài liệu này gồm hai phần: kế hoạch (thiết kế và lịch 10 tuần) và phần theo dõi tiến độ hằng tuần ở cuối file.
 
@@ -37,7 +37,7 @@ Trong 10 tuần, nhóm 5 người xây VietPulse: pipeline Lambda trên k3s phâ
 
 ## 2. Kiến trúc tổng quan
 
-Kafka là điểm vào duy nhất. Speed layer cho kết quả nhanh nhưng gần đúng, batch layer tính lại đầy đủ mỗi đêm, và serving layer gộp hai view theo mốc T.
+Kafka là điểm vào duy nhất. Speed layer cho kết quả nhanh nhưng gần đúng, batch layer tính lại đầy đủ mỗi đêm, và serving layer gộp hai view theo mốc T. HDFS giữ master dataset. Ở lớp phục vụ, MongoDB giữ các view còn Elasticsearch giữ tài liệu để tìm kiếm.
 
 ```mermaid
 flowchart TD
@@ -49,9 +49,14 @@ flowchart TD
     K -->|đọc stream| S["Speed layer<br/>Spark Structured Streaming"]
     K -->|ghi nguyên trạng| H[("HDFS<br/>master dataset")]
     H --> BL["Batch layer<br/>Spark batch hằng đêm"]
-    S -->|real-time view| E[("Elasticsearch + API gộp")]
-    BL -->|batch view| E
-    E --> D["Kibana, Streamlit"]
+    S -->|real-time view| M[("MongoDB<br/>view phục vụ")]
+    BL -->|batch view| M
+    S -->|tài liệu| ES[("Elasticsearch<br/>tìm kiếm")]
+    BL -->|tài liệu| ES
+    M --> API["API gộp theo mốc T"]
+    ES --> API
+    API --> ST["Streamlit"]
+    ES --> KB["Kibana"]
 ```
 
 ## 3. Hợp đồng dữ liệu
@@ -63,13 +68,13 @@ Mọi thành phần giao tiếp qua 4 hợp đồng dưới đây. Đổi một 
 | Trường | Kiểu | Ý nghĩa |
 | --- | --- | --- |
 | source | string | news_article, news_comment, voz_post; youtube_comment nếu làm phần tùy chọn |
-| record_id | string | id gốc ở nguồn; key Kafka = source + record_id |
+| record_id | string | id gốc ở nguồn kèm tiền tố trang, ví dụ `vnexpress:5133904`; key Kafka = `source:record_id` |
 | event_time | timestamp UTC | thời điểm bài hoặc bình luận được viết |
 | ingest_time | timestamp UTC | thời điểm crawler lấy về |
 | schema_version | int | tăng khi đổi cấu trúc payload |
 | payload | JSON | trường riêng của từng nguồn |
 
-Mọi thời gian lưu theo UTC; chỉ đổi sang giờ Việt Nam khi hiển thị.
+Mọi thời gian lưu theo UTC; chỉ đổi sang giờ Việt Nam khi hiển thị. Bản máy đọc được của envelope là `contracts/envelope.schema.json`, bản code là `common/envelope.py`.
 
 ### Kafka topics
 
@@ -99,14 +104,18 @@ Số partition và thời gian giữ là giá trị khởi điểm, chỉnh sau 
 
 Bảng trong clean và curated được đăng ký ở Hive Metastore, partition theo event_date. Bảng bài viết và bình luận được bucket theo article_id để join không cần shuffle.
 
-### Index Elasticsearch
+### Lớp phục vụ: MongoDB và Elasticsearch
 
-| Index | Nội dung | Ghi bởi | Thời gian giữ |
-| --- | --- | --- | --- |
-| vp-rt-YYYY.MM.DD | tổng hợp theo cửa sổ thời gian | speed-sentiment | xóa khi batch view đã phủ |
-| vp-batch-daily | chỉ số cảm xúc theo ngày | batch-publish | lâu dài |
-| vp-docs | bài và bình luận đầy đủ để tìm kiếm | speed-sentiment (bản tạm), batch-publish (bản chuẩn) | lâu dài |
-| vp-meta | mốc T của lần batch gần nhất | batch-publish | lâu dài |
+MongoDB (database `vietpulse`) giữ các view mà API đọc. Elasticsearch chỉ giữ tài liệu để tìm kiếm toàn văn và vẽ Kibana; nếu mất có thể dựng lại từ /clean.
+
+| Kho | Tên | Nội dung | Ghi bởi | Thời gian giữ |
+| --- | --- | --- | --- | --- |
+| MongoDB | rt_window | tổng hợp cảm xúc theo cửa sổ thời gian | speed-sentiment | xóa phần trước mốc T sau mỗi lần batch-publish |
+| MongoDB | batch_daily | chỉ số cảm xúc theo ngày | batch-publish | lâu dài |
+| MongoDB | meta | mốc T của lần batch gần nhất | batch-publish | lâu dài |
+| Elasticsearch | vp-docs | bài và bình luận đầy đủ để tìm kiếm | speed-sentiment (bản tạm), batch-publish (bản chuẩn) | lâu dài |
+
+API gộp đọc meta để lấy mốc T, lấy batch_daily cho phần trước T và rt_window cho phần sau T.
 
 ## 4. Đặc tả Spark job
 
@@ -115,10 +124,10 @@ Hệ thống có 6 job: 2 job streaming chạy liên tục và 4 job batch. Mọ
 | Job | Kiểu và lịch | Đọc → Ghi | Đảm bảo | Phụ trách |
 | --- | --- | --- | --- | --- |
 | raw-ingest | streaming, ghi file mỗi 5–15 phút | Kafka raw.* và raw.backfill → /raw | không mất, không trùng (checkpoint + file sink) | Quang |
-| speed-sentiment | streaming, micro-batch vài chục giây | Kafka raw.* → vp-rt-*, vp-docs, alerts.sentiment | watermark khởi điểm 2 giờ, upsert idempotent | Quang |
+| speed-sentiment | streaming, micro-batch vài chục giây | Kafka raw.* → MongoDB rt_window, vp-docs, alerts.sentiment | watermark khởi điểm 2 giờ, upsert idempotent | Quang |
 | batch-clean | hằng đêm, 1h | /raw của các ngày có dữ liệu mới → /clean | ghi đè theo partition, chạy lại an toàn | Đạt |
 | batch-analytics | hằng đêm, sau batch-clean | /clean → /curated | ghi đè theo partition | Đạt, Thái |
-| batch-publish | hằng đêm, sau batch-analytics | /curated → vp-batch-daily, vp-docs, vp-meta | mốc T chỉ cập nhật ở bước cuối | Đạt |
+| batch-publish | hằng đêm, sau batch-analytics | /curated → MongoDB batch_daily và meta, vp-docs | mốc T chỉ cập nhật ở bước cuối | Đạt |
 | reference-refresh | hằng tuần | /clean → /reference | nhóm duyệt trước khi áp dụng | Thái |
 
 **Điều phối batch:** một CronJob chạy lúc 1h, submit lần lượt batch-clean → batch-analytics → batch-publish và chờ từng job xong. Nếu một bước lỗi, chuỗi dừng và mốc T giữ nguyên. Real-time view chưa bị xóa nên dashboard vẫn đúng.
@@ -135,15 +144,21 @@ Toàn bộ hệ thống chạy trên k3s, chia thành 6 namespace. Hai cấu hì
 | messaging | Kafka chế độ KRaft | Strimzi operator |
 | storage | HDFS NameNode, DataNode; Hive Metastore + PostgreSQL | Helm chart, StatefulSet |
 | processing | 6 Spark job | Spark Operator |
-| serving | Elasticsearch, Kibana, API FastAPI, Streamlit | ECK operator, Deployment |
+| serving | MongoDB, Elasticsearch, Kibana, API FastAPI, Streamlit | MongoDB Community Operator, ECK operator, Deployment |
 | monitoring | Prometheus, Grafana, Alertmanager, Loki | kube-prometheus-stack, Helm chart Loki |
 
-- **Image:** 3 image (crawler, spark, api) được build bằng GitHub Actions và đẩy lên GHCR. Spark image cài sẵn jar Kafka, GraphFrames, Elasticsearch cùng thư viện Python.
+- **Image:** 3 image (crawler, spark, api) được build bằng GitHub Actions và đẩy lên GHCR. Spark image cài sẵn jar Kafka, GraphFrames, Elasticsearch, MongoDB Spark Connector cùng thư viện Python.
 - **Cấu hình:** thư mục `k8s/base` cùng hai overlay single-node và multi-node.
-- **Bí mật:** mật khẩu Elasticsearch (và API key YouTube nếu làm phần tùy chọn) để trong Secret, không commit lên GitHub.
-- **Truy cập:** Kibana, Grafana, API và Streamlit mở qua Traefik, là ingress có sẵn trong k3s.
-- **Ổ đĩa:** k3s dùng local-path, nên pod giữ dữ liệu bị ghim vào một máy. Cấu hình multi-node dựa vào replication của Kafka, HDFS và Elasticsearch.
-- **Môi trường dev:** `docker-compose.yml` chạy Kafka, Spark và Elasticsearch trên máy cá nhân để viết code trước khi lên k3s.
+- **Bí mật:** mật khẩu MongoDB và Elasticsearch (và API key YouTube nếu làm phần tùy chọn) để trong Secret, không commit lên GitHub.
+- **Truy cập:** Kibana, Grafana, API và Streamlit mở qua Traefik, là ingress có sẵn trong k3s. HDFS và MongoDB chỉ mở trong cụm.
+- **Ổ đĩa:** k3s dùng local-path, nên pod giữ dữ liệu bị ghim vào một máy. Cấu hình multi-node dựa vào replication của Kafka, HDFS và Elasticsearch, cùng replica set của MongoDB.
+- **Môi trường dev:** `docker-compose.yml` chạy Kafka, Spark, MongoDB và Elasticsearch trên máy cá nhân để viết code trước khi lên k3s.
+
+**Máy chạy cụm** (chờ kết quả khảo sát ở M1.3):
+
+| Máy | Chủ máy | CPU | RAM | Ổ đĩa | Vai trò trong cụm |
+| --- | --- | --- | --- | --- | --- |
+| _chưa có_ |  |  |  |  |  |
 
 ## 6. Kiểm thử và giám sát
 
@@ -152,7 +167,7 @@ Mỗi lớp của pipeline có kiểm thử riêng. Mọi kết quả đo đư�
 | Loại | Làm gì | Khi nào | Phụ trách |
 | --- | --- | --- | --- |
 | Unit | pytest cho `common/` (làm sạch, tách từ, gắn nhãn, chấm điểm) với SparkSession local | mỗi PR, qua GitHub Actions | người viết code |
-| Tích hợp | trên Compose: crawler mẫu → Kafka → job → Elasticsearch, so số bản ghi ở hai đầu | trước khi merge một job mới | Quang |
+| Tích hợp | trên Compose: crawler mẫu → Kafka → job → MongoDB và Elasticsearch, so số bản ghi ở hai đầu | trước khi merge một job mới | Quang |
 | Chất lượng dữ liệu | kiểm schema, giá trị rỗng, bản trùng, tỉ lệ bản ghi vào dlq | mỗi đêm, trong batch-clean | Đạt |
 | Đối soát | so batch view với real-time view của cùng một ngày | mỗi đêm, sau batch-publish | Thái |
 | Chịu lỗi | kill pod Spark, Kafka broker, DataNode rồi kiểm không mất bản ghi | tuần 8–9 | Quang |
@@ -172,22 +187,39 @@ Mỗi lớp của pipeline có kiểm thử riêng. Mọi kết quả đo đư�
 - Chuỗi batch đêm thất bại.
 - Đĩa của bất kỳ node nào vượt 80%.
 
-## 7. Quyết định kiến trúc (ADR)
+## 7. Kịch bản demo
 
-Có 8 quyết định: 2 đã chốt, 1 đang chờ xác nhận (chốt ở M1.3), 5 đang ở mức đề xuất cần nhóm đồng ý ở M1.2. Mỗi dòng ghi lý do chính để đưa thẳng vào phần Architecture and Design của báo cáo.
+Buổi demo có 3 phần. Phần 1 chạy dữ liệu thật để chứng minh luồng vào. Phần 2 là luồng chính: dùng dữ liệu chuẩn bị sẵn để chủ động tạo tải lớn và các edge case. Phần 3 trình bày kết quả batch của đêm trước, vì batch quá nặng để chạy trực tiếp.
+
+**Phần 1 · Ingestion thật (khoảng 2 phút).** Mở log của một pod crawler RSS báo điện tử, nguồn nhẹ và ít bị chặn. Cho giảng viên thấy bản ghi mới đang được kéo về và đẩy vào raw.news.articles. Xong thì scale crawler về 0 để giải phóng RAM cho phần 2.
+
+**Phần 2 · Edge case với khối lượng lớn (luồng chính).** Một script Python đọc file Parquet vài trăm nghìn bình luận đã chuẩn bị sẵn và bắn dồn dập vào raw.news.comments. Phần lớn bản ghi được đổi event_time thành thời điểm demo; một phần được cố ý cài các edge case dưới đây. Trong lúc chạy, mở Kibana để thấy vp-docs tăng liên tục và Grafana để thấy offset tụt tăng lên rồi giảm về.
+
+| Edge case | Cách tạo trong file Parquet | Kết quả mong đợi |
+| --- | --- | --- |
+| Tải dồn | gửi cả file trong vài phút, không giãn cách | offset tụt tăng rồi giảm về; số bản ghi trong Kafka khớp với /raw |
+| Bản trùng | gửi lại cùng source + record_id nhiều lần | upsert idempotent: vp-docs và rt_window không đếm trùng |
+| Đến muộn | event_time cũ hơn watermark 2 giờ | rt_window không tính bản ghi này; raw-ingest vẫn ghi xuống /raw nên batch đêm tính đủ |
+| Sai schema | thiếu trường bắt buộc, sai kiểu, JSON hỏng | bản ghi bị tách vào dlq.raw, job không dừng |
+| Văn bản khó | emoji, teencode, không dấu, rất dài, rỗng, lẫn tiếng Anh | được chuẩn hóa rồi chấm điểm bằng PhoBERT ONNX qua UDF; văn bản rỗng không làm job lỗi |
+
+**Phần 3 · Batch layer (kết quả đã chạy trước).** Batch chạy GraphFrames, LDA và PhoBERT đầy đủ nên quá tốn tài nguyên để chạy trực tiếp. Mở bảng curated trên HDFS hoặc Streamlit với kết quả của đêm trước để so sánh khoảng cách giữa báo chí và dư luận.
+
+## 8. Quyết định kiến trúc (ADR)
+
+Cả 8 quyết định đã chốt ở M1.7 (18/10/2026). Mỗi dòng ghi lý do chính để đưa thẳng vào phần Architecture and Design của báo cáo.
 
 | Quyết định | Lựa chọn | Lý do chính | Trạng thái |
 | --- | --- | --- | --- |
 | Kiến trúc | Lambda | GraphFrames, huấn luyện MLlib và bucketing cần batch; bình luận đến muộn; đổi model chỉ cần chạy lại batch | Đã chốt |
 | Nền tảng | k3s | nhẹ, ghép được nhiều máy, đáp ứng yêu cầu Kubernetes | Đã chốt |
-| Message queue | Kafka KRaft qua Strimzi | giữ log cho nhiều consumer, replay được, operator lo vận hành | Đề xuất |
-| Lưu trữ dài hạn | HDFS, MinIO làm dự phòng | bám sát chương 3 của môn | Chờ xác nhận |
-| NoSQL phục vụ truy vấn | Elasticsearch | tìm kiếm toàn văn tiếng Việt, có sẵn Kibana | Đề xuất |
-| Catalog | Hive Metastore + PostgreSQL | bucketBy chỉ chạy với saveAsTable, cần catalog dùng chung | Đề xuất |
-| Điều phối batch | CronJob chạy script tuần tự | ít thành phần; chuyển sang Airflow nếu còn thời gian | Đề xuất |
-| Sentiment ở speed layer | PhoBERT bản nhẹ, chạy ONNX trên CPU | giữ độ trễ thấp; model đầy đủ chạy ở batch layer | Đề xuất |
-
-## 8. Phân vai
+| Message queue | Kafka KRaft qua Strimzi | giữ log cho nhiều consumer, replay được, operator lo vận hành | Đã chốt |
+| Lưu trữ dài hạn | HDFS | bám sát chương 3 của môn; MinIO bản community đã ngừng bảo trì từ 12/2025 nên không chọn | Đã chốt |
+| NoSQL phục vụ truy vấn | MongoDB giữ view, Elasticsearch để tìm kiếm | MongoDB upsert theo khóa, hợp với ghi idempotent và API đọc theo khóa; Elasticsearch tìm kiếm toàn văn tiếng Việt, có sẵn Kibana | Đã chốt |
+| Catalog | Hive Metastore + PostgreSQL | bucketBy chỉ chạy với saveAsTable, cần catalog dùng chung | Đã chốt |
+| Điều phối batch | CronJob chạy script tuần tự | ít thành phần; chuyển sang Airflow nếu còn thời gian | Đã chốt |
+| Sentiment ở speed layer | PhoBERT bản nhẹ, chạy ONNX trên CPU | giữ độ trễ thấp; model đầy đủ chạy ở batch layer | Đã chốt |
+## 9. Phân vai
 
 Thái là trưởng nhóm: review mọi PR trước khi merge, điều phối báo cáo và slide, và kiêm vai NLP/ML. Bốn thành viên còn lại ngang nhau, mỗi người sở hữu một lớp của pipeline và các bài Lessons Learned của lớp đó. Khi Thái là người viết code, một thành viên khác review PR đó.
 
@@ -196,10 +228,10 @@ Thái là trưởng nhóm: review mọi PR trước khi merge, điều phối b�
 | Thái | Trưởng nhóm · NLP/ML | review mọi PR, điều phối báo cáo; PhoBERT ONNX, gắn tag/chủ đề/thực thể, MLlib (LDA, baseline), GraphFrames | Data Quality & Testing |
 | Thạch | Platform | k3s, operator, CI/CD image, Kustomize, monitoring | Scaling, Monitoring & Debugging, Security & Governance |
 | Thắng | Ingestion | 3 crawler (bài báo, bình luận báo, VOZ), envelope, Kafka topics, backfill, dlq; crawler YouTube nếu làm phần tùy chọn | Data Ingestion, System Integration |
-| Quang | Streaming và serving | raw-ingest, speed-sentiment, watermark, exactly-once, index Elasticsearch, API gộp, dashboard | Stream Processing, Fault Tolerance |
+| Quang | Streaming và serving | raw-ingest, speed-sentiment, watermark, exactly-once, collection MongoDB, index Elasticsearch, API gộp, dashboard | Stream Processing, Fault Tolerance |
 | Đạt | Batch và lưu trữ | HDFS, Hive Metastore, batch-clean, batch-analytics, batch-publish, join, tối ưu | Data Processing with Spark, Data Storage, Performance Optimization |
 
-## 9. Lịch thực thi (ước tính 10 tuần)
+## 10. Lịch thực thi (ước tính 10 tuần)
 
 Chưa có ngày thuyết trình nên lịch tính theo tuần tương đối: tuần 1 bắt đầu từ buổi kick-off. Nhóm đóng băng tính năng cuối tuần 8 để dành tuần 9–10 cho kiểm thử, báo cáo và tập demo. Khi có ngày cụ thể, ghi ngày bắt đầu và kết thúc vào từng tuần ở phần theo dõi.
 
@@ -225,13 +257,13 @@ Trạng thái mỗi việc là một trong ba giá trị: **Chưa bắt đầu**
 
 | # | Việc | Phụ trách | Trạng thái |
 | --- | --- | --- | --- |
-| M1.1 | Repo GitHub, cấu trúc thư mục, quy trình PR | Thái | Chưa bắt đầu |
-| M1.2 | So sánh HDFS và MinIO cho cụm k3s của nhóm, đề xuất một lựa chọn để Thái chốt | Đạt | Chưa bắt đầu |
-| M1.3 | Khảo sát máy của nhóm (số máy, RAM mỗi máy), chọn máy chạy cụm k3s | Thạch | Chưa bắt đầu |
-| M1.4 | docker-compose chạy Kafka, Spark và Elasticsearch trên máy mỗi người | Thạch | Chưa bắt đầu |
-| M1.5 | Chốt danh sách trang báo và box VOZ; crawl thử 100 bản ghi mỗi nguồn; đo bình luận thường đến muộn bao lâu | Thắng | Chưa bắt đầu |
-| M1.6 | Đề xuất cách demo: chạy real-time trực tiếp hay replay dữ liệu đã thu | Quang | Chưa bắt đầu |
-| M1.7 | Chốt ADR | Thái | Chưa bắt đầu |
+| M1.1 | Repo GitHub, cấu trúc thư mục, quy trình PR | Thái | Đang làm |
+| M1.2 | So sánh HDFS và MinIO cho cụm k3s của nhóm, đề xuất một lựa chọn để Thái chốt | Đạt | Xong |
+| M1.3 | Khảo sát máy của nhóm (số máy, RAM mỗi máy), chọn máy chạy cụm k3s | Thạch | Đang làm |
+| M1.4 | docker-compose chạy Kafka, Spark, MongoDB và Elasticsearch trên máy mỗi người | Thái | Đang làm |
+| M1.5 | Chốt danh sách trang báo và box VOZ; crawl thử 100 bản ghi mỗi nguồn; đo bình luận thường đến muộn bao lâu | Thắng | Đang làm |
+| M1.6 | Đề xuất cách demo: chạy real-time trực tiếp hay replay dữ liệu đã thu | Quang | Xong |
+| M1.7 | Chốt ADR | Thái | Xong |
 
 ### M2 · Cuối tuần 3 · Luồng chạy thông trên k3s
 
@@ -250,7 +282,7 @@ Trạng thái mỗi việc là một trong ba giá trị: **Chưa bắt đầu**
 | M3.1 | HDFS và Hive Metastore chạy trên k3s | Đạt | Chưa bắt đầu |
 | M3.2 | raw-ingest ghi xuống HDFS | Quang | Chưa bắt đầu |
 | M3.3 | batch-clean và batch-publish chạy hằng đêm | Đạt | Chưa bắt đầu |
-| M3.4 | API gộp batch view và real-time view theo mốc T | Quang | Chưa bắt đầu |
+| M3.4 | MongoDB chạy trên k3s; API gộp batch view và real-time view theo mốc T | Quang | Chưa bắt đầu |
 | M3.5 | Backfill lịch sử bắt đầu chạy | Thắng | Chưa bắt đầu |
 | M3.6 | Grafana có dashboard cơ bản cho Spark và Kafka | Thạch | Chưa bắt đầu |
 
@@ -277,10 +309,36 @@ Trạng thái mỗi việc là một trong ba giá trị: **Chưa bắt đầu**
 | M5.4 | Báo cáo 4 phần, Lessons Learned theo đúng mẫu guideline | Cả nhóm, Thái tổng hợp | Chưa bắt đầu |
 | M5.5 | Slide và video demo dự phòng | Thạch | Chưa bắt đầu |
 | M5.6 | Tập demo 2 lần trên cụm thật | Cả nhóm | Chưa bắt đầu |
+| M5.7 | Script replay và file Parquet có edge case cho phần 2 của demo | Quang | Chưa bắt đầu |
 
-## 10. Theo dõi hằng tuần
+## 11. Theo dõi hằng tuần
 
 Cuối mỗi tuần, thêm một mục mới lên trên cùng của phần này: ghi việc đã làm, người phụ trách, link PR, và câu hỏi cho tuần tới. Mỗi câu hỏi phải gắn với một việc trong bảng mốc (thêm việc mới nếu chưa có), để luôn có người được giao trả lời. Câu hỏi chưa xong thì chép sang tuần sau. Đồng thời cập nhật cột Trạng thái ở các bảng mốc phía trên.
+
+### Tuần 1 · 12/10–18/10/2026
+
+**Đã làm trong tuần**
+
+| Việc | Phụ trách | Trạng thái | PR / ghi chú |
+| --- | --- | --- | --- |
+| M1.1 · Repo, cấu trúc thư mục, quy trình PR | Thái | Đang làm | đã có cấu trúc, CONTRIBUTING.md, mẫu PR, CI; còn commit, mở PR và bật bảo vệ nhánh main trên GitHub |
+| M1.2 · Chọn lưu trữ dài hạn | Đạt, Thái chốt | Xong | giữ HDFS; MinIO bản community đã ngừng bảo trì |
+| M1.3 · Khảo sát máy | Thạch | Đang làm | bảng máy ở mục 5 còn trống |
+| M1.4 · docker-compose cho dev | Thái | Đang làm | chuyển từ Thạch sang Thái; đã có docker-compose.yml và smoke test, chờ cài Docker để chạy thử |
+| M1.5 · Nguồn crawl, crawl thử | Thắng (Thái làm thay) | Đang làm | chờ Thái review; kết quả ở docs/m1.5-nguon-du-lieu.md: VnExpress, Tuổi Trẻ, VOZ box Điểm báo; bình luận đến muộn trung vị 3 giờ, p99 khoảng 2 ngày |
+| M1.6 · Kịch bản demo | Quang | Xong | xem mục 7; phần 2 đổi thành thử edge case với khối lượng lớn |
+| M1.7 · Chốt ADR | Thái | Xong | thêm MongoDB, Elasticsearch chỉ để tìm kiếm; các ADR còn lại giữ nguyên |
+
+**Câu hỏi cho tuần tới**
+
+- [ ] Nhóm có bao nhiêu máy, mỗi máy bao nhiêu RAM, máy nào chạy cụm k3s? → M1.3 (Thạch)
+- [x] Crawl những trang báo và box VOZ nào; bình luận thường đến muộn bao lâu? → M1.5 (Thắng): xem docs/m1.5-nguon-du-lieu.md
+- [ ] Nâng watermark của speed-sentiment từ 2 lên 6 giờ không? Bình luận Tuổi Trẻ chờ duyệt, 5% chờ hơn 2 giờ → M2.3 (Quang)
+- [ ] VnExpress chặn bot sau lượt crawl thử: lệnh chặn có tự gỡ không, crawler thật giãn cách bao nhiêu? → M2.2 (Thắng)
+- [ ] Mục tiêu vài triệu bản ghi cần backfill bao nhiêu bài cũ và bắt đầu từ khi nào? → M3.5 (Thắng)
+- [ ] Bản trên k3s dùng đúng phiên bản như docker-compose (Kafka 4.0, Spark 3.5.3, MongoDB 7.0, Elasticsearch 8.15) chưa? → M2.1 (Thạch)
+- [ ] Bản ghi hỏng đi thẳng vào Kafka, không qua crawler, thì job nào tách vào dlq.raw? → M2.3 (Quang)
+- [ ] Dữ liệu replay của demo cũng chảy xuống /raw qua raw-ingest; đánh dấu và loại khỏi master dataset bằng cách nào? → M5.7 (Quang)
 
 ### Tuần 0 · Chuẩn bị (đến 11/10/2026)
 
@@ -296,10 +354,10 @@ Cuối mỗi tuần, thêm một mục mới lên trên cùng của phần này:
 
 **Câu hỏi cho tuần tới**
 
-- [ ] Dùng HDFS thật hay MinIO? → M1.3 (Đạt đề xuất, Thái chốt)
-- [ ] Nhóm có bao nhiêu máy, mỗi máy bao nhiêu RAM, máy nào chạy cụm k3s? → M1.4 (Thạch)
-- [ ] Crawl những trang báo và box VOZ nào? → M1.6 (Thắng)
-- [ ] Buổi demo chạy real-time trực tiếp hay replay dữ liệu đã thu? → M1.7 (Quang)
+- [x] Dùng HDFS thật hay MinIO? → M1.2 (Đạt đề xuất, Thái chốt): giữ HDFS
+- [ ] Nhóm có bao nhiêu máy, mỗi máy bao nhiêu RAM, máy nào chạy cụm k3s? → M1.3 (Thạch): chép sang tuần 1
+- [ ] Crawl những trang báo và box VOZ nào? → M1.5 (Thắng): chép sang tuần 1
+- [x] Buổi demo chạy real-time trực tiếp hay replay dữ liệu đã thu? → M1.6 (Quang): xem mục 7
 
 <details>
 <summary>Mẫu cho tuần mới</summary>

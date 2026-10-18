@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Bí mật và cấu hình máy
+.env
+*.env
+!.env.example
+
+# Dữ liệu crawl và kết quả chạy local
+data/
+*.parquet
+spark-warehouse/
+metastore_db/
+derby.log
+checkpoints/
+
+# IDE, hệ điều hành
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
