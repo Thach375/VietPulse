@@ -1,58 +1,92 @@
-"""Crawler báo điện tử: bài viết qua RSS, bình luận qua API công khai mà trang bài báo tự gọi.
+"""Crawler báo điện tử: bài viết qua RSS hoặc Google News sitemap, bình luận qua API công khai.
 
-Hai trang được hỗ trợ là VnExpress và Tuổi Trẻ, vì cả hai có RSS và API bình luận trả JSON.
+Danh sách báo lấy theo https://miccreative.vn/cac-trang-bao-chinh-thong/, chỉ giữ những trang có RSS
+hoặc sitemap tin tức đọc được (kết quả dò ở docs/m1.5-nguon-du-lieu.md). Bình luận hiện lấy được từ
+VnExpress và Tuổi Trẻ, vì hai trang này có API bình luận trả JSON.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from bs4 import BeautifulSoup
 
 from common.envelope import make_envelope
-from crawlers.base import FeedItem, PoliteSession, hash_user, html_to_text, parse_rss
+from crawlers.base import (
+    FeedItem,
+    PoliteSession,
+    hash_user,
+    html_to_text,
+    parse_news_sitemap,
+    parse_rss,
+)
 
 VN_TZ = timezone(timedelta(hours=7))
+_CATEGORIES = ("thoi-su", "the-gioi", "kinh-doanh", "phap-luat", "giao-duc", "suc-khoe")
 
 
 @dataclass(frozen=True)
 class SiteConfig:
     name: str
     feeds: tuple[str, ...]
-    article_id_pattern: re.Pattern[str]
-    body_selector: str
+    feed_format: str = "rss"  # "rss" hoặc "news_sitemap"
+    body_selector: str | None = None
 
 
 SITES = {
-    "vnexpress": SiteConfig(
-        name="vnexpress",
-        feeds=tuple(
-            f"https://vnexpress.net/rss/{c}.rss"
-            for c in ("thoi-su", "the-gioi", "kinh-doanh", "phap-luat", "giao-duc", "suc-khoe")
+    site.name: site
+    for site in (
+        SiteConfig(
+            "vnexpress",
+            tuple(f"https://vnexpress.net/rss/{c}.rss" for c in _CATEGORIES),
+            body_selector="article.fck_detail p.Normal",
         ),
-        article_id_pattern=re.compile(r"-(\d+)\.html$"),
-        body_selector="article.fck_detail p.Normal",
-    ),
-    "tuoitre": SiteConfig(
-        name="tuoitre",
-        feeds=tuple(
-            f"https://tuoitre.vn/rss/{c}.rss"
-            for c in ("thoi-su", "the-gioi", "kinh-doanh", "phap-luat", "giao-duc", "suc-khoe")
+        SiteConfig(
+            "tuoitre",
+            tuple(f"https://tuoitre.vn/rss/{c}.rss" for c in _CATEGORIES),
+            body_selector="div.detail-content p",
         ),
-        article_id_pattern=re.compile(r"-(\d{15,})\.htm$"),
-        body_selector="div.detail-content p",
-    ),
+        SiteConfig("dantri", ("https://dantri.com.vn/rss/home.rss",)),
+        SiteConfig("vietnamnet", ("https://vietnamnet.vn/home.rss",), body_selector="div.maincontent p"),
+        SiteConfig("thanhnien", ("https://thanhnien.vn/rss/home.rss",)),
+        SiteConfig("tienphong", ("https://tienphong.vn/rss/home.rss",)),
+        SiteConfig("nhandan", ("https://nhandan.vn/rss/home.rss",), body_selector="div.article__body p"),
+        SiteConfig("cand", ("https://cand.vn/rss/home.rss",)),
+        SiteConfig("sggp", ("https://www.sggp.org.vn/rss/home.rss",), body_selector="div.article__body p"),
+        SiteConfig("kenh14", ("https://kenh14.vn/rss/home.rss",), body_selector="div.detail-content p"),
+        SiteConfig(
+            "doisongphapluat",
+            ("https://doisongphapluat.com.vn/rss/tin-tuc.rss",),
+            body_selector="div.edittor-content p",
+        ),
+        SiteConfig("znews", ("https://znews.vn/sitemap/sitemap-news.xml",), feed_format="news_sitemap"),
+    )
 }
 
+# Phần lớn báo kết thúc URL bài bằng id số: -5136488.html, -post1888243.tpo, -a736336.html,
+# -100261024194757437.htm.
+_ARTICLE_ID = re.compile(r"-(?:post|a)?(\d{5,})\.[a-z]+$")
+_ARTICLE_BODY = re.compile(r'"articleBody"\s*:\s*"((?:[^"\\]|\\.)*)"')
 _PUBLISHED_PATTERNS = (
     re.compile(r'"datePublished"\s*:\s*"([^"]+)"'),
     re.compile(r'property="article:published_time"\s+content="([^"]+)"'),
     re.compile(r'itemprop="datePublished"\s+content="([^"]+)"'),
 )
+
+
+def article_id(url: str) -> str:
+    """Lấy id bài từ URL; URL không có id số thì dùng bản băm của đường dẫn."""
+    path = urlsplit(url).path
+    match = _ARTICLE_ID.search(path)
+    if match:
+        return match.group(1)
+    return hashlib.sha1(path.encode()).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -68,18 +102,39 @@ def list_articles(session: PoliteSession, site: SiteConfig) -> list[ArticleRef]:
     """Đọc mọi feed của một trang, bỏ trùng theo article_id."""
     refs: dict[str, ArticleRef] = {}
     for feed in site.feeds:
-        category = feed.rsplit("/", 1)[-1].removesuffix(".rss")
-        for item in parse_rss(session.get(feed).content, default_tz=VN_TZ):
-            match = site.article_id_pattern.search(item.link)
-            if match and match.group(1) not in refs:
-                refs[match.group(1)] = ArticleRef(site.name, match.group(1), item.link, category, item)
+        content = session.get(feed).content
+        if site.feed_format == "news_sitemap":
+            items, category = parse_news_sitemap(content), "news"
+        else:
+            items = parse_rss(content, default_tz=VN_TZ)
+            category = feed.rsplit("/", 1)[-1].removesuffix(".rss")
+        for item in items:
+            if not item.link:
+                continue
+            aid = article_id(item.link)
+            if aid not in refs:
+                refs[aid] = ArticleRef(site.name, aid, item.link, category, item)
     return list(refs.values())
 
 
-def parse_article_page(html: str, body_selector: str) -> tuple[str, datetime | None]:
-    """Lấy thân bài và thời điểm đăng (có múi giờ) từ HTML trang bài báo."""
+def parse_article_page(html: str, body_selector: str | None = None) -> tuple[str, datetime | None]:
+    """Lấy thân bài và thời điểm đăng (có múi giờ) từ HTML trang bài báo.
+
+    Thân bài lấy theo thứ tự: selector riêng của trang, `articleBody` trong JSON-LD, các thẻ `article p`.
+    """
     soup = BeautifulSoup(html, "html.parser")
-    body = "\n".join(p.get_text(" ", strip=True) for p in soup.select(body_selector))
+    body = ""
+    if body_selector:
+        body = "\n".join(p.get_text(" ", strip=True) for p in soup.select(body_selector))
+    if not body:
+        match = _ARTICLE_BODY.search(html)
+        if match:
+            try:
+                body = html_to_text(json.loads(f'"{match.group(1)}"'))
+            except ValueError:
+                body = ""
+    if not body:
+        body = "\n".join(p.get_text(" ", strip=True) for p in soup.select("article p"))
     published = None
     for pattern in _PUBLISHED_PATTERNS:
         match = pattern.search(html)
@@ -91,7 +146,7 @@ def parse_article_page(html: str, body_selector: str) -> tuple[str, datetime | N
             if published.tzinfo is None:
                 published = published.replace(tzinfo=VN_TZ)
             break
-    return body, published
+    return body.strip(), published
 
 
 def article_envelope(ref: ArticleRef, body: str, published: datetime) -> dict[str, Any]:

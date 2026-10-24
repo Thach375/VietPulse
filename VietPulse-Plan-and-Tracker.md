@@ -110,10 +110,11 @@ MongoDB (database `vietpulse`) giữ các view mà API đọc. Elasticsearch ch�
 
 | Kho | Tên | Nội dung | Ghi bởi | Thời gian giữ |
 | --- | --- | --- | --- | --- |
-| MongoDB | rt_window | tổng hợp cảm xúc theo cửa sổ thời gian | speed-sentiment | xóa phần trước mốc T sau mỗi lần batch-publish |
+| MongoDB | rt_window | tổng hợp cảm xúc theo cửa sổ cố định 5 phút | speed-sentiment | xóa phần trước mốc T sau mỗi lần batch-publish |
 | MongoDB | batch_daily | chỉ số cảm xúc theo ngày | batch-publish | lâu dài |
 | MongoDB | meta | mốc T của lần batch gần nhất | batch-publish | lâu dài |
 | Elasticsearch | vp-docs | bài và bình luận đầy đủ để tìm kiếm | speed-sentiment (bản tạm), batch-publish (bản chuẩn) | lâu dài |
+| Elasticsearch | vp-dlq | bản ghi lỗi kèm lý do, để xem trên Kibana | speed-sentiment | 3 ngày (ILM) |
 
 API gộp đọc meta để lấy mốc T, lấy batch_daily cho phần trước T và rt_window cho phần sau T.
 
@@ -124,7 +125,7 @@ Hệ thống có 6 job: 2 job streaming chạy liên tục và 4 job batch. Mọ
 | Job | Kiểu và lịch | Đọc → Ghi | Đảm bảo | Phụ trách |
 | --- | --- | --- | --- | --- |
 | raw-ingest | streaming, ghi file mỗi 5–15 phút | Kafka raw.* và raw.backfill → /raw | không mất, không trùng (checkpoint + file sink) | Quang |
-| speed-sentiment | streaming, micro-batch vài chục giây | Kafka raw.* → MongoDB rt_window, vp-docs, alerts.sentiment | watermark khởi điểm 2 giờ, upsert idempotent | Quang |
+| speed-sentiment | streaming, micro-batch vài chục giây | Kafka raw.* → MongoDB rt_window, vp-docs, alerts.sentiment, dlq.raw, vp-dlq | watermark 6 giờ, cửa sổ cố định 5 phút, bỏ trùng theo record_id, upsert idempotent | Quang |
 | batch-clean | hằng đêm, 1h | /raw của các ngày có dữ liệu mới → /clean | ghi đè theo partition, chạy lại an toàn | Đạt |
 | batch-analytics | hằng đêm, sau batch-clean | /clean → /curated | ghi đè theo partition | Đạt, Thái |
 | batch-publish | hằng đêm, sau batch-analytics | /curated → MongoDB batch_daily và meta, vp-docs | mốc T chỉ cập nhật ở bước cuối | Đạt |
@@ -133,6 +134,36 @@ Hệ thống có 6 job: 2 job streaming chạy liên tục và 4 job batch. Mọ
 **Điều phối batch:** một CronJob chạy lúc 1h, submit lần lượt batch-clean → batch-analytics → batch-publish và chờ từng job xong. Nếu một bước lỗi, chuỗi dừng và mốc T giữ nguyên. Real-time view chưa bị xóa nên dashboard vẫn đúng.
 
 **Dữ liệu đến muộn:** batch-clean không chỉ chạy partition hôm qua mà chạy lại mọi partition có bản ghi mới đến trong ngày. Nhờ ghi đè theo partition, chạy lại bao nhiêu lần cũng cho cùng kết quả.
+
+### Speed layer: watermark, cửa sổ, khử trùng và DLQ
+
+Chốt ở Task 6 (24/10/2026). speed-sentiment gồm hai query cùng đọc các topic raw.*, mỗi query một checkpoint riêng:
+
+| Query | Làm gì | Ghi vào | Làm ở |
+| --- | --- | --- | --- |
+| A · tài liệu, không giữ state | kiểm tra hợp lệ; bản ghi lỗi sang DLQ; bản ghi tốt được chấm sentiment rồi upsert theo record_id | vp-docs, dlq.raw, vp-dlq, alerts.sentiment | M2.3; checkpoint 26/10 chỉ cần query này |
+| B · tổng hợp, giữ state | lọc bản ghi hợp lệ, watermark 6 giờ trên event_time, bỏ trùng theo record_id, đếm theo cửa sổ cố định 5 phút | MongoDB rt_window, upsert qua foreachBatch | M3.4 |
+
+**Watermark 6 giờ** (nâng từ 2 giờ ngày 24/10/2026 theo số đo). Watermark so lúc bài hoặc bình luận được viết (event_time) với lúc Spark nhận được, không so với giờ đăng bài. Số đo trên 490 bình luận Tuổi Trẻ ngày 24/10 (docs/m1.5-nguon-du-lieu.md):
+
+| Chỉ số | Chờ duyệt | Tới Spark, tính cả lịch quét lại bình luận |
+| --- | --- | --- |
+| Trung vị | 39 phút | 57 phút |
+| p95 | 153 phút | 221 phút |
+| Trễ quá 2 giờ | 10,0% | 16,7% |
+| Trễ quá 6 giờ | 1,4% | 2,2% |
+
+Watermark 2 giờ sẽ bỏ khoảng 1/6 bình luận Tuổi Trẻ khỏi rt_window; 6 giờ chỉ bỏ 2,2%. VnExpress không trả lúc duyệt nên chưa đo được phần chờ duyệt; phần chờ tới lần quét kế tiếp tối đa 60 phút. Bản ghi trễ quá 6 giờ vẫn vào vp-docs và HDFS, chỉ thiếu trong rt_window; batch đêm bù lại. Đo lại sau khi crawler chạy thật vài tuần.
+
+**Cửa sổ cố định 5 phút, không dùng cửa sổ trượt.** Mỗi bản ghi chỉ thuộc một ô nên cộng dồn được và gộp đúng với batch_daily tại mốc T. Số "15 phút gần nhất" hay đường làm mượt được tính khi đọc, ở API, Streamlit và luật cảnh báo. Kibana vẽ từ vp-docs, làm mượt bằng `moving_average` trong Lens. Không ghi kết quả cửa sổ vào Elasticsearch, vì sink Elasticsearch chỉ nhận chế độ append nên mỗi ô chỉ hiện ra sau khi watermark trôi qua.
+
+**Khử trùng.** Crawler quét lại bình luận của mỗi bài trong 48 giờ, nên crawler phải nhớ các record_id đã gửi và chỉ gửi bản ghi mới. Spark vẫn bỏ trùng bằng `dropDuplicatesWithinWatermark("record_id")` làm lớp an toàn; bản trùng đến muộn hơn watermark thì đã bị bỏ sẵn. vp-docs upsert theo record_id nên không bị trùng.
+
+**DLQ.** Chỉ speed-sentiment ghi DLQ. raw-ingest vẫn ghi mọi bản ghi xuống HDFS nguyên trạng, batch-clean lọc lại bằng cùng luật.
+
+- Bản ghi bị đưa vào DLQ khi: JSON hỏng; thiếu một trong 6 trường của envelope; source không hợp lệ hoặc không khớp topic; event_time hay ingest_time không đọc được; event_time ở tương lai quá 1 giờ, thường do sai múi giờ; payload không phải object. Luật giống `validate_envelope` trong `common/envelope.py`, nhưng viết bằng biểu thức Spark SQL để không phải gọi Python cho từng bản ghi.
+- Mỗi bản ghi DLQ gồm: raw_value (chuỗi gốc), error (lý do), source_topic, partition, offset, kafka_timestamp, detected_at.
+- dlq.raw giữ 14 ngày. vp-dlq do chính query A ghi, ILM tự xóa sau 3 ngày; không cần consumer riêng.
 
 ## 5. Triển khai
 
@@ -154,11 +185,15 @@ Toàn bộ hệ thống chạy trên k3s, chia thành 6 namespace. Hai cấu hì
 - **Ổ đĩa:** k3s dùng local-path, nên pod giữ dữ liệu bị ghim vào một máy. Cấu hình multi-node dựa vào replication của Kafka, HDFS và Elasticsearch, cùng replica set của MongoDB.
 - **Môi trường dev:** `docker-compose.yml` chạy Kafka, Spark, MongoDB và Elasticsearch trên máy cá nhân để viết code trước khi lên k3s.
 
-**Máy chạy cụm** (chờ kết quả khảo sát ở M1.3):
+**Máy chạy cụm** (kết quả M1.3): cụm multi-node 5 máy, tổng 184 GB RAM và 40 nhân CPU.
 
-| Máy | Chủ máy | CPU | RAM | Ổ đĩa | Vai trò trong cụm |
+| Máy | CPU | RAM | GPU | Ổ trống | Vai trò trong cụm |
 | --- | --- | --- | --- | --- | --- |
-| _chưa có_ |  |  |  |  |  |
+| Thạch | 8 nhân, 16 luồng | 16 GB | RTX 4060 | 200 GB SSD | Quản lý hệ thống: k3s server, Prometheus, Grafana |
+| Thắng | 4 nhân, 8 luồng | 8 GB | Intel Iris Xe | chưa ghi | Thu thập và giao diện: crawler, API, dashboard |
+| Quang | 8 nhân, 16 luồng | 16 GB | RTX 4070 Ti Super | 300 GB | Xử lý batch: HDFS (dữ liệu thô), Spark batch |
+| Đạt | 10 nhân, 16 luồng | 16 GB | RTX 4060 | chưa ghi | Xử lý real-time: Spark Streaming, sentiment |
+| Thái | 10 nhân, 20 luồng | 128 GB | RTX 2080 | 300 GB | Lưu trữ và tính toán chính: MongoDB, Elasticsearch, HDFS, hỗ trợ Spark tác vụ nặng |
 
 ## 6. Kiểm thử và giám sát
 
@@ -179,6 +214,8 @@ Mỗi lớp của pipeline có kiểm thử riêng. Mọi kết quả đo đư�
 - **Spark streaming:** số offset đang tụt, tốc độ vào và tốc độ xử lý, thời gian mỗi batch. Đẩy sang Prometheus qua StreamingQueryListener.
 - **Kafka:** Kafka Exporter của Strimzi và dung lượng đĩa của broker.
 - **Batch:** thời gian chạy từng job, và mốc T có tiến lên mỗi ngày không.
+- **Crawler:** thời điểm gửi bản ghi gần nhất của từng trang, đẩy lên Prometheus.
+- **DLQ:** tốc độ vào dlq.raw so với tổng tốc độ vào raw.*, lấy từ Kafka Exporter.
 
 **Cảnh báo** (ngưỡng khởi điểm):
 
@@ -186,6 +223,8 @@ Mỗi lớp của pipeline có kiểm thử riêng. Mọi kết quả đo đư�
 - Số offset tụt tăng liên tục quá 15 phút.
 - Chuỗi batch đêm thất bại.
 - Đĩa của bất kỳ node nào vượt 80%.
+- Bản ghi vào dlq.raw chiếm trên 5% tổng số bản ghi trong 15 phút. Dùng tỉ lệ thay vì số tuyệt đối vì cả hệ thống chỉ có vài bản ghi mỗi phút.
+- Một trang không có bản ghi mới quá 60 phút, chỉ tính từ 7h đến 23h giờ Việt Nam. Khi trang đổi HTML, crawler thường trả về rỗng chứ không sinh bản ghi lỗi, nên cảnh báo DLQ không bắt được.
 
 ## 7. Kịch bản demo
 
@@ -199,7 +238,7 @@ Buổi demo có 3 phần. Phần 1 chạy dữ liệu thật để chứng minh 
 | --- | --- | --- |
 | Tải dồn | gửi cả file trong vài phút, không giãn cách | offset tụt tăng rồi giảm về; số bản ghi trong Kafka khớp với /raw |
 | Bản trùng | gửi lại cùng source + record_id nhiều lần | upsert idempotent: vp-docs và rt_window không đếm trùng |
-| Đến muộn | event_time cũ hơn watermark 2 giờ | rt_window không tính bản ghi này; raw-ingest vẫn ghi xuống /raw nên batch đêm tính đủ |
+| Đến muộn | event_time cũ hơn watermark 6 giờ | rt_window không tính bản ghi này; raw-ingest vẫn ghi xuống /raw nên batch đêm tính đủ |
 | Sai schema | thiếu trường bắt buộc, sai kiểu, JSON hỏng | bản ghi bị tách vào dlq.raw, job không dừng |
 | Văn bản khó | emoji, teencode, không dấu, rất dài, rỗng, lẫn tiếng Anh | được chuẩn hóa rồi chấm điểm bằng PhoBERT ONNX qua UDF; văn bản rỗng không làm job lỗi |
 
@@ -257,11 +296,11 @@ Trạng thái mỗi việc là một trong ba giá trị: **Chưa bắt đầu**
 
 | # | Việc | Phụ trách | Trạng thái |
 | --- | --- | --- | --- |
-| M1.1 | Repo GitHub, cấu trúc thư mục, quy trình PR | Thái | Đang làm |
+| M1.1 | Repo GitHub, cấu trúc thư mục, quy trình PR | Thái | Xong |
 | M1.2 | So sánh HDFS và MinIO cho cụm k3s của nhóm, đề xuất một lựa chọn để Thái chốt | Đạt | Xong |
-| M1.3 | Khảo sát máy của nhóm (số máy, RAM mỗi máy), chọn máy chạy cụm k3s | Thạch | Đang làm |
-| M1.4 | docker-compose chạy Kafka, Spark, MongoDB và Elasticsearch trên máy mỗi người | Thái | Đang làm |
-| M1.5 | Chốt danh sách trang báo và box VOZ; crawl thử 100 bản ghi mỗi nguồn; đo bình luận thường đến muộn bao lâu | Thắng | Đang làm |
+| M1.3 | Khảo sát máy của nhóm (số máy, RAM mỗi máy), chọn máy chạy cụm k3s | Thạch | Xong |
+| M1.4 | docker-compose chạy Kafka, Spark, MongoDB và Elasticsearch trên máy mỗi người | Thái | Xong |
+| M1.5 | Chốt danh sách trang báo và box VOZ; crawl thử 100 bản ghi mỗi nguồn; đo bình luận thường đến muộn bao lâu | Thái | Đang làm |
 | M1.6 | Đề xuất cách demo: chạy real-time trực tiếp hay replay dữ liệu đã thu | Quang | Xong |
 | M1.7 | Chốt ADR | Thái | Xong |
 
@@ -331,13 +370,13 @@ Cuối mỗi tuần, thêm một mục mới lên trên cùng của phần này:
 
 **Câu hỏi cho tuần tới**
 
-- [ ] Nhóm có bao nhiêu máy, mỗi máy bao nhiêu RAM, máy nào chạy cụm k3s? → M1.3 (Thạch)
+- [x] Nhóm có bao nhiêu máy, mỗi máy bao nhiêu RAM, máy nào chạy cụm k3s? → M1.3 (Thạch): cả 5 máy, máy Thạch chạy k3s server; xem mục 5
 - [x] Crawl những trang báo và box VOZ nào; bình luận thường đến muộn bao lâu? → M1.5 (Thắng): xem docs/m1.5-nguon-du-lieu.md
-- [ ] Nâng watermark của speed-sentiment từ 2 lên 6 giờ không? Bình luận Tuổi Trẻ chờ duyệt, 5% chờ hơn 2 giờ → M2.3 (Quang)
-- [ ] VnExpress chặn bot sau lượt crawl thử: lệnh chặn có tự gỡ không, crawler thật giãn cách bao nhiêu? → M2.2 (Thắng)
+- [x] Nâng watermark của speed-sentiment từ 2 lên 6 giờ không? Bình luận Tuổi Trẻ chờ duyệt, 5% chờ hơn 2 giờ → M2.3 (Quang): nâng lên 6 giờ theo số đo 24/10 (16,7% bình luận Tuổi Trẻ trễ quá 2 giờ), xem mục 4 phần Speed layer
+- [x] VnExpress chặn bot sau lượt crawl thử: lệnh chặn có tự gỡ không, crawler thật giãn cách bao nhiêu? → M2.2 (Thắng): đã tự gỡ trước 24/10; giãn cách 3–5 giây mỗi host, xem docs/m1.5-nguon-du-lieu.md
 - [ ] Mục tiêu vài triệu bản ghi cần backfill bao nhiêu bài cũ và bắt đầu từ khi nào? → M3.5 (Thắng)
 - [ ] Bản trên k3s dùng đúng phiên bản như docker-compose (Kafka 4.0, Spark 3.5.3, MongoDB 7.0, Elasticsearch 8.15) chưa? → M2.1 (Thạch)
-- [ ] Bản ghi hỏng đi thẳng vào Kafka, không qua crawler, thì job nào tách vào dlq.raw? → M2.3 (Quang)
+- [x] Bản ghi hỏng đi thẳng vào Kafka, không qua crawler, thì job nào tách vào dlq.raw? → M2.3 (Quang): query A của speed-sentiment, xem mục 4 phần Speed layer
 - [ ] Dữ liệu replay của demo cũng chảy xuống /raw qua raw-ingest; đánh dấu và loại khỏi master dataset bằng cách nào? → M5.7 (Quang)
 
 ### Tuần 0 · Chuẩn bị (đến 11/10/2026)

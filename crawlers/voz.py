@@ -1,7 +1,8 @@
 """Crawler diễn đàn VOZ (XenForo 2).
 
-Chỉ đọc trang danh sách box `/f/<slug>.<id>/` và trang thread `/t/<slug>.<id>/page-<n>`,
-là những dạng URL robots.txt của VOZ cho phép. Không gọi `/t/*/post-`, `/p/`, `/search/`.
+Mặc định lấy thread từ trang `/feeds/hot` (các thread đang nóng của mọi box). Chỉ đọc trang danh sách
+`/feeds/hot`, `/f/<slug>.<id>/` và trang thread `/t/<slug>.<id>/page-<n>`, là những dạng URL robots.txt
+của VOZ cho phép. Không gọi `/t/*/post-`, `/p/`, `/search/`.
 VOZ khai báo `Content-Signal: ai-train=no`: dữ liệu VOZ chỉ dùng để suy luận, không dùng để fine-tune model.
 """
 
@@ -18,6 +19,7 @@ from common.envelope import make_envelope
 from crawlers.base import PoliteSession, hash_user
 
 BASE_URL = "https://voz.vn"
+HOT_FEED = "/feeds/hot"
 FORUMS = {33: "/f/diem-bao.33/", 17: "/f/chuyen-tro-linh-tinhtm.17/", 92: "/f/kinh-te-luat.92/"}
 _THREAD_HREF = re.compile(r"^/t/[^/]+\.(\d+)/$")
 
@@ -45,7 +47,7 @@ def parse_forum_page(html: str) -> list[ThreadRef]:
     return threads
 
 
-def parse_thread_page(html: str, thread: ThreadRef, forum_id: int) -> list[dict[str, Any]]:
+def parse_thread_page(html: str, thread: ThreadRef, forum_id: int | None) -> list[dict[str, Any]]:
     """Đổi các bài trong một trang thread thành envelope; phần trích dẫn bài khác bị bỏ khỏi nội dung."""
     soup = BeautifulSoup(html, "html.parser")
     out = []
@@ -77,9 +79,14 @@ def parse_thread_page(html: str, thread: ThreadRef, forum_id: int) -> list[dict[
     return out
 
 
-def fetch_posts(session: PoliteSession, forum_id: int, limit: int) -> list[dict[str, Any]]:
-    """Lấy bài từ trang 1 của các thread mới nhất trong box (bỏ thread ghim) cho đến khi đủ `limit`."""
-    threads = parse_forum_page(session.get(BASE_URL + FORUMS[forum_id]).text)
+def fetch_posts(
+    session: PoliteSession, limit: int, listing: str = HOT_FEED, forum_id: int | None = None
+) -> list[dict[str, Any]]:
+    """Lấy bài từ trang 1 của các thread trong trang danh sách (bỏ thread ghim) cho đến khi đủ `limit`.
+
+    Thread lấy từ `/feeds/hot` thuộc nhiều box khác nhau nên `forum_id` để trống.
+    """
+    threads = parse_forum_page(session.get(BASE_URL + listing).text)
     posts: list[dict[str, Any]] = []
     for thread in threads:
         if thread.sticky:

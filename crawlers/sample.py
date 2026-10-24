@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,21 @@ from crawlers import news, voz
 from crawlers.base import PoliteSession
 
 DELAY_THRESHOLDS_H = (1, 2, 6, 24, 48)
+# Lịch quét lại bình luận đề xuất ở M1.5 (phút tính từ giờ đăng bài):
+# 15 phút một lần trong 6 giờ đầu, mỗi giờ một lần đến giờ thứ 48, lần cuối ở giờ thứ 72.
+POLL_SCHEDULE_MIN = tuple(range(15, 361, 15)) + tuple(range(420, 2881, 60)) + (4320,)
+
+
+def spark_lateness_min(published: datetime, written: datetime, visible: datetime) -> float | None:
+    """Độ trễ tới Spark (phút) nếu crawler quét theo POLL_SCHEDULE_MIN.
+
+    Crawler thấy bình luận ở lần quét đầu tiên sau lúc nó hiện ra; None nếu hiện ra sau lần quét cuối.
+    """
+    age = (visible - published).total_seconds() / 60
+    poll = next((p for p in POLL_SCHEDULE_MIN if p >= age), None)
+    if poll is None:
+        return None
+    return (published + timedelta(minutes=poll) - written).total_seconds() / 60
 
 
 def _ts(value: str) -> datetime:
@@ -69,26 +85,49 @@ def main() -> None:
     articles: list[dict[str, Any]] = []
     comments: list[dict[str, Any]] = []
     lateness: dict[str, Any] = {"crawled_at": now.isoformat(), "sites": {}}
-    per_site = args.per_source // len(news.SITES)
+    per_site = math.ceil(args.per_source / len(sites))
 
     for site in sites:
-        refs = news.list_articles(session, site)
-        print(f"[{site.name}] {len(refs)} bài trong RSS")
+        try:
+            refs = news.list_articles(session, site)
+        except Exception as exc:  # một trang lỗi không được làm hỏng cả lượt crawl thử
+            print(f"[{site.name}] lỗi khi đọc feed: {exc!r}")
+            lateness["sites"][site.name] = {"error": repr(exc)}
+            continue
+        print(f"[{site.name}] {len(refs)} bài trong feed")
         site_articles = []
         for ref in refs[:per_site]:
-            envelope = news.fetch_article(session, ref)
+            try:
+                envelope = news.fetch_article(session, ref)
+            except Exception as exc:
+                print(f"[{site.name}] lỗi khi đọc bài {ref.url}: {exc!r}")
+                continue
             if envelope:
                 site_articles.append(envelope)
         articles.extend(site_articles)
+        if site.name not in news.COMMENT_FETCHERS:
+            lateness["sites"][site.name] = {
+                "articles_in_feed": len(refs),
+                "articles_sampled": len(site_articles),
+                "articles_with_body": sum(1 for a in site_articles if a["payload"]["body"]),
+            }
+            print(f"[{site.name}] {len(site_articles)} bài (không lấy bình luận)")
+            continue
 
         # Ưu tiên bài cũ nhất trong RSS để bình luận kịp "chín" trước khi đo độ trễ.
         dated = sorted((r for r in refs if r.feed_item.published), key=lambda r: r.feed_item.published)
-        delays_all, delays_old, moderation = [], [], []
+        delays_all, delays_old, moderation, spark_lag = [], [], [], []
+        missed_by_schedule = 0
         site_comments = []
         for ref in dated[: args.comment_articles]:
             published = ref.feed_item.published
             age_h = (now - published).total_seconds() / 3600
-            for c in news.COMMENT_FETCHERS[site.name](session, ref.article_id):
+            try:
+                fetched = news.COMMENT_FETCHERS[site.name](session, ref.article_id)
+            except Exception as exc:
+                print(f"[{site.name}] lỗi khi lấy bình luận bài {ref.article_id}: {exc!r}")
+                continue
+            for c in fetched:
                 site_comments.append(c)
                 delay = (_ts(c["event_time"]) - published).total_seconds() / 60
                 delays_all.append(delay)
@@ -97,8 +136,14 @@ def main() -> None:
                 visible = c["payload"].get("published_time")
                 if visible:
                     moderation.append((_ts(visible) - _ts(c["event_time"])).total_seconds() / 60)
+                    lag = spark_lateness_min(published, _ts(c["event_time"]), _ts(visible))
+                    if lag is None:
+                        missed_by_schedule += 1
+                    else:
+                        spark_lag.append(lag)
         comments.extend(site_comments)
         lateness["sites"][site.name] = {
+            "articles_in_feed": len(refs),
             "articles_with_body": sum(1 for a in site_articles if a["payload"]["body"]),
             "articles_sampled": len(site_articles),
             "comment_articles": min(len(dated), args.comment_articles),
@@ -106,11 +151,13 @@ def main() -> None:
             "delay_vs_article_all": summarize_delays(delays_all),
             "delay_vs_article_age_ge_24h": summarize_delays(delays_old),
             "moderation_delay": summarize_delays(moderation),
+            "spark_lateness_with_poll_schedule": summarize_delays(spark_lag),
+            "missed_by_poll_schedule": missed_by_schedule,
         }
         print(f"[{site.name}] {len(site_articles)} bài, {len(site_comments)} bình luận")
 
-    posts = voz.fetch_posts(session, forum_id=33, limit=args.per_source)
-    print(f"[voz] {len(posts)} bài từ box Điểm báo")
+    posts = voz.fetch_posts(session, limit=args.per_source)
+    print(f"[voz] {len(posts)} bài từ {voz.HOT_FEED}")
 
     write_jsonl(args.out / "news_article.jsonl", articles)
     write_jsonl(args.out / "news_comment.jsonl", comments)

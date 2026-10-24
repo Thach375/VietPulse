@@ -1,6 +1,34 @@
-from crawlers.base import hash_user, parse_rss
-from crawlers.news import VN_TZ, parse_article_page, parse_tuoitre_comments, parse_vnexpress_comments
+from datetime import datetime, timedelta
+
+import pytest
+import requests
+
+from crawlers.base import PoliteSession, hash_user, parse_news_sitemap, parse_rss
+from crawlers.news import (
+    VN_TZ,
+    article_id,
+    parse_article_page,
+    parse_tuoitre_comments,
+    parse_vnexpress_comments,
+)
+from crawlers.sample import spark_lateness_min
 from crawlers.voz import ThreadRef, parse_forum_page, parse_thread_page
+
+_PUBLISHED = datetime(2026, 10, 24, 8, 0, tzinfo=VN_TZ)
+
+
+def test_spark_lateness_uses_next_poll_after_comment_is_visible():
+    written = _PUBLISHED + timedelta(hours=3)  # 11:00
+    visible = written + timedelta(minutes=35)  # duyệt 11:35; 6 giờ đầu quét 15 phút/lần → thấy lúc 11:45
+    assert spark_lateness_min(_PUBLISHED, written, visible) == 45
+
+
+def test_spark_lateness_polls_hourly_after_six_hours_and_misses_after_last_poll():
+    written = _PUBLISHED + timedelta(hours=10, minutes=10)  # sau 6 giờ quét mỗi giờ → thấy ở giờ thứ 11
+    assert spark_lateness_min(_PUBLISHED, written, written) == 50
+    too_late = _PUBLISHED + timedelta(hours=80)
+    assert spark_lateness_min(_PUBLISHED, too_late, too_late) is None
+
 
 RSS = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -36,6 +64,89 @@ def test_parse_rss_drops_naive_dates_without_default_tz():
         "<rss><channel><item><title>A</title><pubDate>10/18/2026 8:21:00 PM</pubDate></item></channel></rss>"
     )
     assert parse_rss(xml)[0].published is None
+
+
+def test_parse_news_sitemap_reads_title_link_and_time():
+    xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">
+  <url>
+    <loc>https://znews.vn/moi-lien-he-post1691710.html</loc>
+    <news:news>
+      <news:publication_date>2026-10-24T20:44:55+07:00</news:publication_date>
+      <news:title><![CDATA[Moi lien he giua thanh cong va chi so IQ]]></news:title>
+    </news:news>
+  </url>
+</urlset>"""
+    [item] = parse_news_sitemap(xml)
+    assert item.link == "https://znews.vn/moi-lien-he-post1691710.html"
+    assert item.title == "Moi lien he giua thanh cong va chi so IQ"
+    assert item.published.isoformat() == "2026-10-24T20:44:55+07:00"
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://vnexpress.net/viet-nam-bi-5136488.html", "5136488"),
+        ("https://tienphong.vn/thu-khoa-post1888243.tpo", "1888243"),
+        ("https://kenh14.vn/starbucks-215261024134013287.chn", "215261024134013287"),
+        ("https://tuoitre.vn/sao-bong-chuyen-100261024194757437.htm", "100261024194757437"),
+        ("https://doisongphapluat.com.vn/tong-bi-thu-a736336.html", "736336"),
+    ],
+)
+def test_article_id_reads_numeric_id_from_url(url, expected):
+    assert article_id(url) == expected
+
+
+def test_article_id_falls_back_to_stable_hash():
+    url = "https://example.vn/bai-viet-khong-co-so.html"
+    assert article_id(url) == article_id(url + "?utm=x")
+    assert len(article_id(url)) == 16
+
+
+def test_parse_article_page_falls_back_to_json_ld_article_body():
+    html = '<script type="application/ld+json">{"articleBody": "Đoạn \\u0031 <b>đậm</b>"}</script>'
+    body, _ = parse_article_page(html)
+    assert body == "Đoạn 1 đậm"
+
+
+class _FakeResponse:
+    def __init__(self, text="", status_code=200):
+        self.status_code = status_code
+        self.text = text
+        self.headers = {"Content-Type": "text/xml; charset=utf-8"}
+
+    def raise_for_status(self):
+        pass
+
+
+def test_get_retries_after_connection_reset(monkeypatch):
+    session = PoliteSession(min_interval=0, retry_backoff=(0,))
+    monkeypatch.setattr(session, "_allowed", lambda url: True)
+    calls = []
+
+    def flaky(url, timeout, **kwargs):
+        calls.append(url)
+        if len(calls) == 1:
+            raise requests.ConnectionError("Remote end closed connection without response")
+        return _FakeResponse("<rss/>")
+
+    monkeypatch.setattr(session._http, "get", flaky)
+    assert session.get("https://tuoitre.vn/rss/home.rss").status_code == 200
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("robots", "allowed"),
+    [
+        ("User-agent: *\nAllow: /", True),
+        ('<html><script>document.cookie="D1N=1";location.reload()</script></html>', False),
+    ],
+)
+def test_robots_served_as_html_is_treated_as_disallow(monkeypatch, robots, allowed):
+    session = PoliteSession(min_interval=0)
+    monkeypatch.setattr(session._http, "get", lambda url, timeout: _FakeResponse(robots))
+    assert session._allowed("https://laodong.vn/") is allowed
 
 
 def test_parse_article_page_reads_body_and_published_time():
