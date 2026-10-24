@@ -80,6 +80,8 @@ services:
   spark:
     build: docker/spark-dev
     image: vietpulse/spark-dev:3.5.3
+    # Image tự build trên máy, không có trên registry; `docker compose pull` sẽ bỏ qua.
+    pull_policy: build
     depends_on:
       kafka:
         condition: service_healthy
