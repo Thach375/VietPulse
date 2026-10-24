@@ -1,5 +1,7 @@
 import unittest
-from common.text_processing import normalize_text, analyze_sentiment
+
+from common.text_processing import analyze_sentiment, normalize_text
+
 
 class TestTextProcessing(unittest.TestCase):
     def test_normalize_html(self):
@@ -27,6 +29,7 @@ class TestTextProcessing(unittest.TestCase):
 
     def test_neutral_text(self):
         self.assertEqual(analyze_sentiment("Hôm nay là thứ hai")["label"], "neutral")
+
 
 if __name__ == "__main__":
     unittest.main()

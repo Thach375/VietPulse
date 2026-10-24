@@ -6,22 +6,25 @@ POSITIVE_WORDS = {"tốt", "tuyệt vời", "hài lòng", "hay"}
 NEGATIVE_WORDS = {"tệ", "kém", "dở", "lỗi"}
 NEGATIONS = {"không", "chẳng", "chưa"}
 INTENSIFIERS = {"rất", "cực kỳ", "quá"}
-TOKEN_PATTERN = re.compile(r'\w+')
+TOKEN_PATTERN = re.compile(r"\w+")
+
 
 def normalize_text(text: str | None) -> str:
     """Chuẩn hóa văn bản: xử lý None, xóa HTML tags, entities, chuẩn hóa NFC và khoảng trắng."""
     if not text:
         return ""
-    text = re.sub(r'<[^>]+>', '', text)
-    text = text.replace('&nbsp;', ' ')
+    text = re.sub(r"<[^>]+>", "", text)
+    text = text.replace("&nbsp;", " ")
     text = unicodedata.normalize("NFC", text)
-    text = re.sub(r'\s+', ' ', text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
     return text
+
 
 def _contains_phrase(text: str, phrase: str) -> bool:
     """Kiểm tra một cụm từ có tồn tại độc lập trong văn bản hay không."""
     pattern = r"(?<!\w)" + re.escape(phrase).replace(r"\ ", r"\s+") + r"(?!\w)"
     return bool(re.search(pattern, text, re.IGNORECASE))
+
 
 def analyze_sentiment(text: str) -> dict:
     """Phân tích cảm xúc bằng luật cơ bản kết hợp từ điển và từ bổ nghĩa/phủ định."""
@@ -35,7 +38,7 @@ def analyze_sentiment(text: str) -> dict:
     score = 0.0
     matched_spans: list[tuple[int, int]] = []
 
-    for phrase, polarity in ([(p, 1) for p in positive_hits] + [(p, -1) for p in negative_hits]):
+    for phrase, polarity in [(p, 1) for p in positive_hits] + [(p, -1) for p in negative_hits]:
         pattern = r"(?<!\w)" + re.escape(phrase).replace(r"\ ", r"\s+") + r"(?!\w)"
         for match in re.finditer(pattern, text, re.IGNORECASE):
             span = match.span()
@@ -43,7 +46,7 @@ def analyze_sentiment(text: str) -> dict:
                 continue
             matched_spans.append(span)
 
-            before = text[max(0, span[0] - 30):span[0]]
+            before = text[max(0, span[0] - 30) : span[0]]
             negated = any(_contains_phrase(before, negation) for negation in NEGATIONS)
             intensified = any(_contains_phrase(before, word) for word in INTENSIFIERS)
 
