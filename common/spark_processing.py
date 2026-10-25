@@ -3,7 +3,7 @@
 Kiểm envelope bằng SQL; chỉ chuẩn hóa và chấm sentiment mới chạy Python UDF.
 """
 
-from pyspark.sql import DataFrame
+from pyspark.sql import DataFrame, Window
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 
@@ -48,6 +48,8 @@ def parse_kafka_records(records: DataFrame) -> DataFrame:
     fields = F.json_object_keys("raw_value")
     missing = F.array_except(F.array(*[F.lit(name) for name in REQUIRED_FIELDS]), fields)
     topic_map = F.create_map(*[F.lit(value) for pair in SOURCE_TOPICS.items() for value in pair])
+    # Wildcard trên mảng bọc ngoài giữ dấu nháy JSON; StringType tự ép số/bool thành chuỗi.
+    record_id_json = F.get_json_object(F.concat(F.lit("["), F.col("raw_value"), F.lit("]")), "$[*].record_id")
     error = (
         F.when(fields.isNull(), "JSON không hợp lệ hoặc bản ghi không phải object")
         .when(F.size(missing) > 0, F.concat(F.lit("thiếu trường: "), F.concat_ws(", ", missing)))
@@ -56,7 +58,9 @@ def parse_kafka_records(records: DataFrame) -> DataFrame:
         )
         .when(F.col("source_topic") != topic_map[F.col("envelope.source")], "source không khớp topic")
         .when(
-            F.col("envelope.record_id").isNull() | (F.length(F.trim("envelope.record_id")) == 0),
+            F.col("envelope.record_id").isNull()
+            | ~record_id_json.startswith('"')
+            | (F.length(F.trim("envelope.record_id")) == 0),
             "record_id rỗng hoặc không hợp lệ",
         )
         .when(
@@ -100,12 +104,20 @@ def _score_text(text):
     normalized = normalize_text(text)
     return {
         "normalized_text": normalized,
-        "sentiment": {**analyze_sentiment(normalized), "model": "rules-v1"},
+        "sentiment": {**analyze_sentiment(text), "model": "rules-v1"},
     }
 
 
 def build_documents(valid: DataFrame) -> DataFrame:
     """Tạo tài liệu tìm kiếm; khóa ghép tránh trùng id bài báo với id bình luận cùng trang."""
+    # Chọn bản mới nhất trong batch để các task ghi song song không đua nhau trên cùng _id.
+    latest = Window.partitionBy("envelope.source", "envelope.record_id").orderBy(
+        F.col("ingest_time").desc(),
+        F.col("kafka_timestamp").desc(),
+        F.col("partition").desc(),
+        F.col("offset").desc(),
+    )
+    valid = valid.withColumn("_rank", F.row_number().over(latest)).filter(F.col("_rank") == 1)
     payload = F.col("envelope.payload")
     text = F.when(
         F.col("envelope.source") == "news_article",

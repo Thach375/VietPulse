@@ -52,6 +52,10 @@ def test_sql_validation_routes_bad_records_without_a_python_udf(spark):
         (json.dumps({**good, "source": "unknown"}), "raw.news.comments", "source không hợp lệ"),
         (json.dumps(good), "raw.news.articles", "source không khớp topic"),
         (json.dumps({**good, "record_id": " "}), "raw.news.comments", "record_id"),
+        *[
+            (json.dumps({**good, "record_id": value}), "raw.news.comments", "record_id")
+            for value in (123, True, {}, [], None)
+        ],
         (json.dumps({**good, "schema_version": "1"}), "raw.news.comments", "schema_version"),
         (json.dumps({**good, "schema_version": 0}), "raw.news.comments", "schema_version"),
         (json.dumps({**good, "payload": []}), "raw.news.comments", "payload"),
@@ -104,3 +108,29 @@ def test_dlq_retains_raw_value_and_kafka_position(spark):
     assert row.error
     assert row.kafka_timestamp == datetime(2026, 10, 25)
     assert row.detected_at is not None
+
+
+def test_documents_choose_latest_ingest_in_batch_with_stable_offset_tiebreak(spark):
+    old = {**envelope(payload={"content": "Tệ"}), "ingest_time": "2026-10-24T00:00:00Z"}
+    new = {**old, "payload": {"content": "Rất tốt"}, "ingest_time": "2026-10-25T00:00:00Z"}
+    # Offset cao hơn nhưng ingest_time cũ hơn không được ghi đè phiên bản mới.
+    values = [(json.dumps(value), "raw.news.comments") for value in (old, new, old, new)]
+    [document] = build_documents(parse_kafka_records(kafka_rows(spark, values))).collect()
+    assert document.sentiment.label == "positive"
+    assert document.content == "Rất tốt"
+
+
+def test_sink_failure_propagates_and_releases_cached_batch(spark, monkeypatch):
+    from jobs import speed_sentiment as job
+
+    records = kafka_rows(spark, [(json.dumps(envelope()), "raw.news.comments")])
+    parsed = parse_kafka_records(records)
+    monkeypatch.setattr(job, "parse_kafka_records", lambda records: parsed)
+
+    def fail(documents, config):
+        raise OSError("Elasticsearch unavailable")
+
+    monkeypatch.setattr(job, "write_documents", fail)
+    with pytest.raises(OSError, match="Elasticsearch unavailable"):
+        job.process_batch(records, 0, job.JobConfig())
+    assert not parsed.is_cached
