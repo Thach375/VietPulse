@@ -1,0 +1,13 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>vietpulse</groupId><artifactId>runtime-jars</artifactId><version>1</version>
+  <profiles>
+    <profile><id>kafka</id><dependencies>
+      <dependency><groupId>org.apache.spark</groupId><artifactId>spark-sql-kafka-0-10_2.13</artifactId><version>4.0.4</version></dependency>
+    </dependencies></profile>
+    <profile><id>hive</id><dependencies>
+      <dependency><groupId>org.apache.hive</groupId><artifactId>hive-metastore</artifactId><version>4.0.1</version></dependency>
+      <dependency><groupId>org.apache.hive</groupId><artifactId>hive-exec</artifactId><version>4.0.1</version></dependency>
+    </dependencies></profile>
+  </profiles>
+</project>

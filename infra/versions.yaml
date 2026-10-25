@@ -34,8 +34,10 @@ processing:
   java_major: "17"
   python_minor: "3.11"
   kafka_connector: "org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.4"
-  # Task 6 must align PySpark, driver/executor images, and connectors with this
-  # target. The repository's existing Spark 3.5.3 dev setup is not yet migrated.
+  pymongo: "4.19.0"
+  confluent_kafka: "2.16.0"
+  # Task 6 aligns the development/application runtimes with this target.
+  # Actual image publication and live cluster acceptance remain required.
   application_validation_required: true
 
 storage:

@@ -1,5 +1,5 @@
 # Spark cho môi trường dev: chạy local mode, Python 3.11 như phần còn lại của repo.
-# Image Spark chính thức đi kèm Python 3.10, không chạy được code trong common/.
+# Keep Python 3.11 / Java 17 explicit, matching the Kubernetes application image.
 FROM python:3.11-slim-bookworm
 
 RUN apt-get update \
