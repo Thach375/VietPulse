@@ -20,6 +20,7 @@ from common.spark_processing import (
     parse_kafka_records,
 )
 from jobs.es_http import bulk_index_partition
+from jobs.setup_elasticsearch import setup_elasticsearch
 from jobs.speed_window import WindowConfig, start_dedup_query, start_window_query
 
 LOGGER = logging.getLogger(__name__)
@@ -169,6 +170,7 @@ def main():
     spark.conf.set("spark.sql.session.timeZone", "UTC")
     queries = []
     try:
+        setup_elasticsearch(config.es_url, config.docs_index, config.dlq_index)
         documents = start_query(spark, config)
         queries.append(documents)
         if config.enable_windows:

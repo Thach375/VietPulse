@@ -29,7 +29,7 @@ ENVELOPE_SCHEMA = T.StructType(
 JSON_OPTIONS = {"allowSingleQuotes": "false", "allowNonNumericNumbers": "false"}
 
 
-def parse_kafka_records(records: DataFrame) -> DataFrame:
+def parse_kafka_records(records: DataFrame, allow_backfill: bool = False) -> DataFrame:
     """Giữ chuỗi gốc và vị trí Kafka, thêm envelope đã parse cùng lý do lỗi (hoặc null)."""
     parsed = records.select(
         F.col("value").cast("string").alias("raw_value"),
@@ -56,7 +56,11 @@ def parse_kafka_records(records: DataFrame) -> DataFrame:
         .when(
             ~F.coalesce(F.col("envelope.source").isin(sorted(SOURCES)), F.lit(False)), "source không hợp lệ"
         )
-        .when(F.col("source_topic") != topic_map[F.col("envelope.source")], "source không khớp topic")
+        .when(
+            (F.col("source_topic") != topic_map[F.col("envelope.source")])
+            & ~(F.lit(allow_backfill) & (F.col("source_topic") == "raw.backfill")),
+            "source không khớp topic",
+        )
         .when(
             F.col("envelope.record_id").isNull()
             | ~record_id_json.startswith('"')
