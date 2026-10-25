@@ -10,7 +10,13 @@ from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import types as T  # noqa: E402
 
 from common.envelope import make_envelope  # noqa: E402
-from jobs.speed_window import WindowConfig, build_windows, prepare_deduplicated  # noqa: E402
+from jobs.speed_window import (  # noqa: E402
+    DEDUP_SCHEMA,
+    WindowConfig,
+    build_windows,
+    prepare_deduplicated,
+    window_document,
+)
 
 
 @pytest.fixture(scope="module")
@@ -76,6 +82,23 @@ def test_deduplicates_record_id_and_aggregates_tumbling_window(spark, tmp_path):
     assert rows[0].source == "news_comment"
     assert rows[0].site == "vnexpress"
     assert rows[0].window.end - rows[0].window.start == timedelta(minutes=5)
+    document = window_document(rows[0], batch_id=7)
+    assert document == window_document(rows[0], batch_id=7)
+    assert document["total"] == 1
+
+    # The second stateful operation runs as a separate streaming query.
+    second_input = spark.readStream.schema(DEDUP_SCHEMA).parquet(str(output))
+    query = (
+        build_windows(second_input)
+        .writeStream.format("memory")
+        .queryName("speed_window_test")
+        .outputMode("update")
+        .option("checkpointLocation", str(tmp_path / "window-checkpoint"))
+        .trigger(availableNow=True)
+        .start()
+    )
+    assert query.awaitTermination(90)
+    assert spark.sql("SELECT total FROM speed_window_test").first().total == 1
 
 
 def test_window_paths_must_not_overlap():
