@@ -14,7 +14,23 @@ htmlcov/
 # Bí mật và cấu hình máy
 .env
 *.env
+.env.*
 !.env.example
+
+# Local cluster inventory, access credentials, and generated deployment output
+/infra/local/
+/infra/reports/
+/infra/secrets/
+/k8s/secrets/*
+!/k8s/secrets/README.md
+.kube/
+kubeconfig
+kubeconfig.*
+*.kubeconfig
+*.key
+*.pem
+id_ed25519*
+id_rsa*
 
 # Dữ liệu crawl và kết quả chạy local
 data/

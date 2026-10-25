@@ -1,0 +1,73 @@
+# Deployment target, reviewed 2026-10-25. Exact release pins, never "latest".
+# Compatibility evidence and the application migration gate are in the runbook.
+# Task 1 installs nothing; later tasks must consume these pins explicitly.
+schema_version: 1
+reviewed_on: "2026-10-25"
+
+foundation:
+  ubuntu_lts_supported: ["22.04", "24.04"]
+  ubuntu_lts_preferred: "24.04"
+  k3s: "v1.35.9+k3s1"
+  kubectl: "v1.35.9"
+  helm: "v3.20.2"
+  flannel_backend: "vxlan"
+  verification_image: "docker.io/library/busybox:1.37.0"
+  # Keep bundled Traefik, CoreDNS, metrics-server, and local-path-provisioner
+  # at the versions shipped by this K3s release; do not install extra copies.
+
+messaging:
+  helm_repository: "https://strimzi.io/charts/"
+  helm_chart: "strimzi-kafka-operator"
+  chart_version: "1.2.0"
+  operator_version: "1.2.0"
+  kafka: "4.2.1"
+  # Strimzi 1.2.0 tests Kubernetes 1.30-1.36 and supports Kafka 4.2.1.
+
+processing:
+  helm_repository: "https://kubeflow.github.io/spark-operator"
+  helm_chart: "spark-operator"
+  chart_version: "2.5.2"
+  operator_version: "2.5.2"
+  spark: "4.0.4"
+  scala_binary: "2.13"
+  java_major: "17"
+  python_minor: "3.11"
+  kafka_connector: "org.apache.spark:spark-sql-kafka-0-10_2.13:4.0.4"
+  # Task 6 must align PySpark, driver/executor images, and connectors with this
+  # target. The repository's existing Spark 3.5.3 dev setup is not yet migrated.
+  application_validation_required: true
+
+storage:
+  hadoop: "3.3.6"
+  hive_metastore: "4.0.1"
+  postgresql: "16.15"
+  # Hive 4.0.1 is documented with Hadoop 3.3.6; Spark 4.0.4 supports HMS 4.0.1.
+  # Task 4 must package the matching metastore client/JDBC jars and test schema
+  # creation; Task 6 must use metastore.version=4.0.1 and compatible client jars.
+
+serving:
+  mongodb_operator_repository: "https://mongodb.github.io/helm-charts"
+  mongodb_operator_chart: "mongodb-kubernetes"
+  mongodb_operator_chart_version: "1.14.0"
+  mongodb: "7.0.45"
+  # MCK is the maintained successor of the archived Community Operator.
+  # Use the Community API and a one-member replica set, without Ops Manager.
+  elastic_operator_repository: "https://helm.elastic.co"
+  elastic_operator_chart: "eck-operator"
+  elastic_operator_chart_version: "3.5.0"
+  elasticsearch: "8.19.23"
+  kibana: "8.19.23"
+
+monitoring:
+  prometheus_repository: "https://prometheus-community.github.io/helm-charts"
+  prometheus_chart: "kube-prometheus-stack"
+  prometheus_chart_version: "92.13.1"
+  loki_repository: "https://grafana.github.io/helm-charts"
+  loki_chart: "loki"
+  loki_chart_version: "7.5.0"
+  loki: "3.6.16"
+  # Use the chart-pinned Prometheus, Grafana, and Alertmanager defaults. Task 7
+  # must disable unused integrations, bound retention, and render against 1.35.
+
+# FastAPI/Streamlit/crawler images do not exist yet. Pin their immutable image
+# references in Tasks 6-7 once built; never invent registry URLs or digests.
