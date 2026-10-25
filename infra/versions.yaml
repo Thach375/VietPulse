@@ -29,6 +29,7 @@ processing:
   chart_version: "2.5.2"
   operator_version: "2.5.2"
   spark: "4.0.4"
+  smoke_image: "apache/spark:4.0.4-scala2.13-java17-python3-ubuntu"
   scala_binary: "2.13"
   java_major: "17"
   python_minor: "3.11"
