@@ -11,9 +11,11 @@ import os
 import re
 import runpy
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 import xml.etree.ElementTree as ET
@@ -55,7 +57,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("java-home", "hadoop-home", "hive-home", "postgres-bin", "jdbc-jar"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    parser.add_argument("--spark-client-jars", type=Path)
+    parser.add_argument("--spark-only", action="store_true")
     args = parser.parse_args()
+    if args.spark_only and not args.spark_client_jars:
+        parser.error("--spark-only requires --spark-client-jars")
     pins = yaml.safe_load((ROOT / "infra/versions.yaml").read_text())["storage"]
     if hashlib.sha256(args.jdbc_jar.read_bytes()).hexdigest() != pins["postgresql_jdbc_sha256"]:
         raise ValueError("JDBC driver does not match the pinned SHA-256")
@@ -268,6 +274,25 @@ def main():
         print(
             "PASS: PostgreSQL schema initialized; catalog DDL succeeded through Metastore Thrift.", flush=True
         )
+        if args.spark_client_jars:
+            host_java = Path(shutil.which("java")).resolve().parents[1]
+            output = run(
+                [
+                    sys.executable,
+                    ROOT / "tests/integration/catalog_spark_smoke.py",
+                    "--hdfs-uri",
+                    f"hdfs://127.0.0.1:{rpc}",
+                    "--metastore-uri",
+                    env["HIVE_METASTORE_URI"],
+                    "--hive-jars",
+                    args.spark_client_jars,
+                ],
+                extra={"JAVA_HOME": str(host_java), "HADOOP_USER_NAME": "spark"},
+                timeout=240,
+            )
+            print(output, flush=True)
+        if args.spark_only:
+            return
         stop("metastore")
         # Keep the original "empty" flag to exercise a main-container-only restart.
         start("metastore", ["bash", work / "start-metastore.sh"], {"HADOOP_USER_NAME": "hive"})

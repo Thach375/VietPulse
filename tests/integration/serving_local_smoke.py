@@ -44,7 +44,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("mongod", "mongosh", "elasticsearch-home", "kibana-home"):
         parser.add_argument(f"--{name}", required=True, type=Path)
+    parser.add_argument("--processing-kafka-home", type=Path)
+    parser.add_argument("--processing-real-crawler", action="store_true")
+    parser.add_argument("--processing-only", action="store_true")
     args = parser.parse_args()
+    if args.processing_only and not args.processing_kafka_home:
+        parser.error("--processing-only requires --processing-kafka-home")
     pins = yaml.safe_load((ROOT / "infra/versions.yaml").read_text())["serving"]
     config = next(yaml.safe_load_all((ROOT / "k8s/base/serving/databases.yaml").read_text()))["data"]
     work = Path(tempfile.mkdtemp(prefix="vietpulse-serving-local-"))
@@ -302,6 +307,14 @@ def main():
         http_probe("document")
         http_probe("search")
         print("PASS: Elasticsearch HTTPS/authentication, indexing and search.", flush=True)
+        if args.processing_kafka_home:
+            from processing_local_smoke import run_processing_checks
+
+            run_processing_checks(
+                work, env, mongo_uri, args.processing_kafka_home, args.processing_real_crawler
+            )
+        if args.processing_only:
+            return
         start("kibana", kb_command, {"NODE_OPTIONS": "--max-old-space-size=768"})
         wait_for(lambda: http_probe("kibana"))
         print("PASS: Kibana HTTPS API reports an available Elasticsearch connection.", flush=True)
