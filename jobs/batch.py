@@ -71,14 +71,15 @@ def commit_daily(client, documents, boundary, run_id):
                     )
                     operations.append(ReplaceOne({"_id": document["_id"]}, document, upsert=True))
                 database.batch_daily.bulk_write(operations, ordered=False, session=session)
+            # Cleanup and the boundary belong to the same transaction: a
+            # cleanup error must not leave a failed publish with an advanced T.
+            database.rt_window.delete_many({"window_end": {"$lte": boundary}}, session=session)
             database.meta.replace_one(
                 {"_id": "batch"},
                 {"_id": "batch", "T": boundary, "run_id": run_id, "published_at": datetime.now(UTC)},
                 upsert=True,
                 session=session,
             )
-    # This cleanup follows the successful transaction; API reads still filter at T.
-    database.rt_window.delete_many({"window_end": {"$lte": boundary}})
 
 
 def register_table(spark, name, path, root):

@@ -8,7 +8,7 @@ from pyspark.sql import SparkSession  # noqa: E402
 
 from common.envelope import make_envelope  # noqa: E402
 from common.spark_processing import parse_kafka_records  # noqa: E402
-from jobs.batch import clean_records, daily_metrics, reference_digest  # noqa: E402
+from jobs.batch import clean_records, commit_daily, daily_metrics, reference_digest  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -54,3 +54,15 @@ def test_reference_approval_digest_covers_exact_candidate_contents():
     first = [{"term": "báo", "count": 3}, {"term": "tin", "count": 2}]
     assert reference_digest(first) == reference_digest(list(reversed(first)))
     assert reference_digest(first) != reference_digest([{"term": "báo", "count": 4}])
+
+
+def test_cleanup_error_never_advances_publish_boundary():
+    from unittest.mock import MagicMock
+
+    client = MagicMock()
+    database = client.__getitem__.return_value
+    database.meta.find_one.return_value = None
+    database.rt_window.delete_many.side_effect = OSError("cleanup failed")
+    with pytest.raises(OSError, match="cleanup failed"):
+        commit_daily(client, [], datetime.now(UTC), "failed-run")
+    database.meta.replace_one.assert_not_called()

@@ -87,7 +87,7 @@ def write_dlq(errors: DataFrame, config: JobConfig):
         F.to_json(F.struct(*fields), {"ignoreNullFields": "false"}).alias("value"),
     ).write.format("kafka").option("kafka.bootstrap.servers", config.bootstrap_servers).option(
         "topic", "dlq.raw"
-    ).save()
+    ).option("kafka.acks", "all").option("kafka.enable.idempotence", "true").save()
 
 
 def process_batch(records: DataFrame, batch_id: int, config: JobConfig):
