@@ -15,12 +15,9 @@ from pathlib import Path
 from typing import Any
 
 from crawlers import news, voz
-from crawlers.base import PoliteSession
+from crawlers.base import POLL_SCHEDULE_MIN, PoliteSession
 
 DELAY_THRESHOLDS_H = (1, 2, 6, 24, 48)
-# Lịch quét lại bình luận đề xuất ở M1.5 (phút tính từ giờ đăng bài):
-# 15 phút một lần trong 6 giờ đầu, mỗi giờ một lần đến giờ thứ 48, lần cuối ở giờ thứ 72.
-POLL_SCHEDULE_MIN = tuple(range(15, 361, 15)) + tuple(range(420, 2881, 60)) + (4320,)
 
 
 def spark_lateness_min(published: datetime, written: datetime, visible: datetime) -> float | None:

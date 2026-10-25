@@ -84,3 +84,20 @@ docker compose exec spark spark-submit jobs/speed_sentiment.py
 ```
 
 Hướng dẫn chạy, checkpoint, mapping và kiểm thử toàn luồng: [docs/m2.3-speed-sentiment.md](docs/m2.3-speed-sentiment.md).
+
+## Chạy thông cả luồng (M2.2–M2.4)
+
+Crawler → Kafka → speed-sentiment → Elasticsearch → Kibana trên docker-compose:
+
+```bash
+docker compose up -d --build
+docker compose exec spark python -m jobs.setup_elasticsearch --url http://elasticsearch:9200
+python -m jobs.setup_kibana --url http://localhost:5601          # tạo dashboard "VietPulse · Real-time"
+docker compose exec -d spark spark-submit jobs/speed_sentiment.py  # speed layer chạy nền, liên tục
+python -m crawlers.run --interval-minutes 15                       # crawler chạy trên máy host
+```
+
+- Dashboard: <http://localhost:5601/app/dashboards#/view/vp-realtime>. Tự làm mới mỗi 30 giây.
+- `python -m crawlers.run --once` quét một lượt rồi thoát; `--sites tuoitre,vnexpress --max-new-articles 5` để chạy nhanh khi demo.
+- Crawler nhớ bản ghi đã gửi trong `data/state/crawler.sqlite`, nên chạy lại không gửi trùng. Xóa file này để gửi lại từ đầu.
+- Bình luận của mỗi bài được quét lại theo lịch: 15 phút một lần trong 6 giờ đầu, mỗi giờ một lần đến giờ thứ 48, lần cuối ở giờ thứ 72.

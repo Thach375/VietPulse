@@ -14,6 +14,10 @@ from urllib.parse import urlsplit
 import requests
 from bs4 import BeautifulSoup
 
+# Lịch quét lại bình luận của mỗi bài, tính bằng phút từ giờ đăng (M1.5): 15 phút một lần trong 6 giờ đầu,
+# mỗi giờ một lần đến giờ thứ 48, lần cuối ở giờ thứ 72.
+POLL_SCHEDULE_MIN = tuple(range(15, 361, 15)) + tuple(range(420, 2881, 60)) + (4320,)
+
 USER_AGENT = (
     "VietPulse-research-bot/0.1 (+https://github.com/Thach375/VietPulse; HUST IT4043E student project)"
 )
