@@ -62,7 +62,7 @@ Lần chạy Spark đầu tiên tải jar connector nên mất vài phút; các 
 | Dịch vụ | Từ máy host | Từ container khác | Phiên bản |
 | --- | --- | --- | --- |
 | Kafka (KRaft) | `localhost:9094` | `kafka:9092` | 4.0.0 |
-| Spark (local mode, Python 3.11) | UI `localhost:4040` khi có job | chạy bằng `docker compose exec spark ...` | 3.5.3 |
+| Spark (local mode, Python 3.11) | UI `localhost:4040` khi có job | chạy bằng `docker compose exec spark ...` | 4.0.4 |
 | MongoDB | `localhost:27017` | `mongodb:27017` | 7.0.14 |
 | Elasticsearch | `localhost:9200` | `elasticsearch:9200` | 8.15.3 |
 | Kibana | `localhost:5601` | | 8.15.3 |

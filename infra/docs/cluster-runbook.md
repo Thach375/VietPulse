@@ -159,12 +159,10 @@ Later scripts/manifests must consume the pins, render charts for Kubernetes
   [Spark runtime](https://spark.apache.org/docs/4.0.4/),
   [metastore compatibility](https://spark.apache.org/docs/4.0.4/sql-data-sources-hive-tables.html),
   [Hive release pairing](https://hive.apache.org/general/downloads/).
-- **Application gate for Task 6:** the existing development image and
-  `pyproject.toml` still use Spark 3.5.3 and Scala 2.12 connectors. The target above
-  requires an explicit application migration, dependency/image alignment,
-  connector replacement, and streaming/catalog regression tests. Task 1 does
-  not perform that migration. Do not deploy the current development image as
-  though it already implements this target. Task 4 must test metastore schema
+- **Application gate for Task 6:** the development and application definitions
+  now use Spark 4.0.4 / Scala 2.13 / Java 17. Build and publish the application
+  images before deployment, and pass the streaming/catalog regression gates
+  described in the [Task 6 runbook](processing-runbook.md). Task 4 must test metastore schema
   creation against PostgreSQL 16.15, with matching JDBC/client jars; Task 6 must
   set `spark.sql.hive.metastore.version=4.0.1` and package compatible client jars.
   Source: [PostgreSQL release](https://www.postgresql.org/docs/release/16.15/).
@@ -809,11 +807,12 @@ sudo k3s kubectl apply -k k8s/base/serving
 bash infra/scripts/verify-serving.sh
 ```
 
-Run installation and verification one at a time. The `multi-node` overlay now
-contains Task 5 custom resources, so applying it during Tasks 3-4 before the
-MCK/ECK CRDs exist will fail. After both operators are installed, that overlay
-can be rendered or reapplied as a whole. Do not delete PVCs, PVs, Secret
-values, or ECK-generated resources as a retry tactic.
+Run installation and verification one at a time. The `multi-node` overlay
+contains later custom resources as well, including Task 6 Spark applications.
+Apply the individual bases during Tasks 3-5. Applying the full release requires
+all included operator CRDs and the Task 6 image renderer; plain Kustomize keeps
+the application templates suspended. Do not delete PVCs, PVs, Secret values,
+or ECK-generated resources as a retry tactic.
 
 The verifier follows the literal inventory and strict SSH conventions. It
 supports `--env-file FILE` and a host-free `--dry-run`. Live verification checks
@@ -845,3 +844,13 @@ References: [MCK Community resource samples](https://github.com/mongodb/mongodb-
 [ECK API 3.5.0](https://www.elastic.co/docs/reference/cloud-on-k8s/api-reference/3_5_0),
 [Kibana saved objects](https://www.elastic.co/docs/extend/kibana/key-concepts/saved-objects),
 and [Kibana encryption keys](https://www.elastic.co/docs/reference/kibana/configuration-reference/security-settings).
+
+## Ingestion and processing (Task 6)
+
+Continue on branch `k3s`. The [processing runbook](processing-runbook.md) covers
+the two streaming applications, batch/reference orchestration, crawlers, image
+build/publication, namespace-local Secret copies, local smoke tests and live
+acceptance. Render Task 6 with actual image digests using
+`infra/scripts/render_processing.py`; the checked-in templates are suspended
+and deliberately contain required image markers. The unrendered multi-node
+overlay is not a runnable application release.

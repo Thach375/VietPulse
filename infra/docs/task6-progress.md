@@ -4,7 +4,8 @@
 
 Continue all K3s deployment work on **`k3s`**. The user requested that Tasks
 3, 4, 5 and 6 share that branch; do not create another branch per task.
-Task 6 is **in progress**, not accepted as complete.
+Task 6 application/deployment code is implemented. **Live acceptance remains
+pending image publication and the four-node cluster.**
 
 Only Node 1 is available. Keep the four-node placement and production demo
 resource budgets in deployment code, and verify locally where possible.
@@ -24,9 +25,10 @@ documents. Read them, but do not automatically add them to a commit.
   account/RBAC, and places controller/webhook on Node 1.
 - `infra/scripts/verify-processing.sh --smoke` submits a temporary SparkPi
   application with the pinned official Spark 4.0.4 image. Its template passed
-  the exact chart CRD schema. The live command has not run. The pipeline and
-  ingestion check flags currently fail explicitly because those checks are
-  not implemented yet; dry runs make no SSH connections.
+  the exact chart CRD schema. The live command has not run. Pipeline/ingestion
+  flags validate runtime resources, a real crawler/Kafka receipt and an actual
+  sequential batch chain; missing published artifacts fail explicitly.
+  Dry runs make no SSH connections.
 - `jobs/raw_ingest.py` preserves raw Kafka values and coordinates in a Parquet
   file sink with its own checkpoint. Local Spark tests cover malformed values,
   checkpoint reuse and additional input without duplicate committed output.
@@ -38,37 +40,29 @@ documents. Read them, but do not automatically add them to a commit.
   and stable-ID bulk indexing. Per-item failures raise an error. Query A and
   `jobs/setup_elasticsearch.py` now use this client instead of the Elasticsearch
   Hadoop connector.
-- The latest increment wires the optional window queries into
+- The streaming entrypoint wires the optional window queries into
   `jobs/speed_sentiment.py` and adds their directories to the HDFS bootstrap
-  and probe. Full Kafka/HDFS/MongoDB/Elasticsearch integration remains untested.
+  and probe. The native pipeline and separate Spark/HDFS/Hive checks now pass.
+- Kafka-producing crawler entrypoints, durable acknowledgement state, all four
+  batch stages and the shared heavy-run controller are implemented. MongoDB
+  daily views, real-time cleanup and `meta.T` commit in one transaction.
+- The processing/ingestion bases, immutable image renderer, Secret-copy helper,
+  application Dockerfiles, GHCR build workflow and live verifier are complete.
+  See [the Task 6 runbook](processing-runbook.md) for exact commands and gates.
 
 ## Outstanding work
 
-1. Align project dependencies and images with Spark 4.0.4 / Scala 2.13 / Java 17.
-   `pyproject.toml` and the Compose development image still pin Spark 3.5.3.
-   PyMongo 4.19.0 is installed only in the temporary test environment and must
-   be declared for the application; importing the new window module requires
-   it. Existing development instructions also need updating for this migration.
-2. Verify the new MongoDB window sink and Elasticsearch HTTPS client against
-   actual services, including retries/restarts. Check query startup ordering,
-   checkpoint isolation and failure propagation through the complete job.
-3. Implement Kafka-producing crawler entrypoints and durable deduplication,
-   reusing the existing news/VOZ fetchers and envelope/topic contracts. First
-   prove a real source produces a valid envelope, then enable all three sources.
-4. Implement `batch-clean`, `batch-analytics`, `batch-publish` and
-   `reference-refresh` against the existing project contracts. Publish must
-   advance `meta.T` only after all required writes succeed.
-5. Add application Dockerfiles and consume real published image references.
-   No registry/tag/digest has been supplied; do not invent a published image.
-6. Add processing/ingestion manifests and their Kustomizations, including
-   placement, resources, Secret/CA mounts, HDFS/catalog configuration, separate
-   checkpoints and one executor per application initially.
-7. Add sequential clean → analytics → publish orchestration, stop on failure,
-   prevent overlapping heavy runs and require explicit approval before
-   reference-refresh is applied.
-8. Finish `--check-pipelines` and `--check-ingestion`, failure-case tests and
-   the Task 6 runbook. Full Task 6 acceptance must remain pending until actual
-   images and the four-node cluster are available.
+1. Run the complete Docker builds in CI or on a machine with Docker access.
+   Native Maven resolution and Spark/Hive client checks have passed; the local
+   Docker socket still denies access. The workflow builds on `k3s` pushes and
+   publishes only on explicit manual input or an `images-*` release tag.
+2. Publish the two images and fill `infra/local/application-images.yaml` with
+   their actual digests. No published digest has been invented or recorded.
+3. When Nodes 2-4 are available, complete the earlier live tier gates, render
+   the release, provision namespace-local Secret copies, and run the full
+   Task 6 verifier against actual operators, pod placement and PVCs.
+4. Enable scheduled ingestion/batch only after those gates pass. Complete the
+   broader physical failure/replay acceptance suite in Task 8.
 
 ## Verified locally
 
@@ -76,17 +70,18 @@ The pinned Helm chart rendered successfully. SparkApplication smoke YAML was
 validated against its CRD. Bash syntax, ShellCheck and Ruff passed for the
 completed increments.
 
-The latest targeted run passed **28 tests**:
+The final full repository test run passed **208 tests**, with Spark tests
+enabled and no skips. Relevant tests can be run with:
 
 ```bash
-/tmp/vietpulse-task2-venv/bin/pytest \
-  tests/test_speed_sentiment.py tests/test_speed_window.py \
-  tests/test_storage_deployment.py -q
+/tmp/vietpulse-task2-venv/bin/pytest -q
 ```
 
-Earlier Task 6 runs also passed the raw-ingest checkpoint/file-sink tests and
-the Elasticsearch bulk/authentication tests. A full repository run is still
-required after the remaining Task 6 changes.
+The native service test passed a real crawler/Kafka offset check, streaming
+checkpoint restarts, Elasticsearch document/DLQ writes, MongoDB windows and
+all three daily stages. A real failed MongoDB transaction preserved daily
+views and `meta.T`. The separate catalog test verified Spark 4.0.4 writing
+replicated Parquet to HDFS and reading partitions through Hive Metastore 4.0.1.
 
 ## Local tools and references
 
@@ -95,6 +90,11 @@ required after the remaining Task 6 changes.
 - Helm: `/tmp/linux-amd64/helm`; kubectl: `/tmp/vietpulse-kubectl`.
 - Spark Operator chart: `/tmp/vietpulse-spark-chart/spark-operator` (2.5.2).
 - Native serving distributions: `/tmp/vietpulse-serving-tools`.
+- Resolved Kafka/Hive client jars: `/tmp/vietpulse-task6-jars`.
+- Native pipeline evidence: `/tmp/vietpulse-task6-native.log`.
+- Final native durability regression: `/tmp/vietpulse-task6-native-final.log`.
+- Full test report: `/tmp/vietpulse-task6-pytest-final.log`.
+- Native Spark/HDFS/Hive evidence: `/tmp/vietpulse-task6-catalog.log`.
 - [Spark 4.0.4 stateful operation restrictions](https://spark.apache.org/docs/4.0.4/streaming/apis-on-dataframes-and-datasets.html#unsupported-operations):
   deduplication followed by aggregation cannot be chained in Update mode; this
   is the reason the aggregation branch uses two queries.
