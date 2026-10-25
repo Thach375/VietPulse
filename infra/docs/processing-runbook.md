@@ -75,6 +75,11 @@ workflow is present on the repository's default branch. The workflow uses
 `GITHUB_TOKEN`, not a password committed to the repository. Publication has
 not been performed by the implementation agent.
 
+Both Dockerfiles passed the initial
+[GitHub build run](https://github.com/Thach375/VietPulse/actions/runs/40203568897),
+including the Spark image's embedded runtime check. Build success alone does
+not publish an image or supply a registry digest for deployment.
+
 For local builds, from the repository root:
 
 ```bash

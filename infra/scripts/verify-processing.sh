@@ -174,6 +174,11 @@ for app in raw-ingest speed-sentiment; do
         ((SECONDS < deadline)) || fail "$app did not become RUNNING; check application artifacts"
         sleep 5
     done
+    for role in driver executor; do
+        selector="vietpulse.io/application=$app,vietpulse.io/spark-role=$role"
+        k -n processing wait --for=create pod -l "$selector" --timeout=300s >&2
+        k -n processing wait --for=condition=Ready pod -l "$selector" --timeout=300s >&2
+    done
 done
 directory=$(mktemp -d)
 trap 'rm -rf -- "$directory"' EXIT

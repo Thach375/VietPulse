@@ -52,16 +52,14 @@ documents. Read them, but do not automatically add them to a commit.
 
 ## Outstanding work
 
-1. Run the complete Docker builds in CI or on a machine with Docker access.
-   Native Maven resolution and Spark/Hive client checks have passed; the local
-   Docker socket still denies access. The workflow builds on `k3s` pushes and
-   publishes only on explicit manual input or an `images-*` release tag.
-2. Publish the two images and fill `infra/local/application-images.yaml` with
+1. Publish the two images and fill `infra/local/application-images.yaml` with
    their actual digests. No published digest has been invented or recorded.
-3. When Nodes 2-4 are available, complete the earlier live tier gates, render
+   The workflow publishes only on explicit manual input or an `images-*`
+   release tag; routine `k3s` pushes build and validate the images.
+2. When Nodes 2-4 are available, complete the earlier live tier gates, render
    the release, provision namespace-local Secret copies, and run the full
    Task 6 verifier against actual operators, pod placement and PVCs.
-4. Enable scheduled ingestion/batch only after those gates pass. Complete the
+3. Enable scheduled ingestion/batch only after those gates pass. Complete the
    broader physical failure/replay acceptance suite in Task 8.
 
 ## Verified locally
@@ -82,6 +80,13 @@ checkpoint restarts, Elasticsearch document/DLQ writes, MongoDB windows and
 all three daily stages. A real failed MongoDB transaction preserved daily
 views and `meta.T`. The separate catalog test verified Spark 4.0.4 writing
 replicated Parquet to HDFS and reading partitions through Hive Metastore 4.0.1.
+
+[GitHub CI](https://github.com/Thach375/VietPulse/actions/runs/40203568846)
+passed on the implementation commit. Both complete container builds, including
+the in-image Spark/Python/Kafka-classpath check, also
+[passed on GitHub](https://github.com/Thach375/VietPulse/actions/runs/40203568897).
+The local Docker socket remains inaccessible, so container verification used
+the GitHub runner.
 
 ## Local tools and references
 
