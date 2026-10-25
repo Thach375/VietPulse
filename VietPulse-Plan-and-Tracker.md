@@ -310,7 +310,7 @@ Trạng thái mỗi việc là một trong ba giá trị: **Chưa bắt đầu**
 | --- | --- | --- | --- |
 | M2.1 | Cụm k3s đã cài Strimzi, Spark Operator, ECK | Thạch | Chưa bắt đầu |
 | M2.2 | Crawler RSS một trang báo gửi vào Kafka | Thắng | Chưa bắt đầu |
-| M2.3 | speed-sentiment bản đầu (sentiment tạm bằng luật) ghi vào Elasticsearch | Quang | Chưa bắt đầu |
+| M2.3 | speed-sentiment bản đầu (sentiment tạm bằng luật) ghi vào Elasticsearch | Quang | Đang làm |
 | M2.4 | 1 dashboard Kibana hiển thị kết quả real-time | Quang | Chưa bắt đầu |
 | M2.5 | Image build tự động qua GitHub Actions | Thạch | Chưa bắt đầu |
 

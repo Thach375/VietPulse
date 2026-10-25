@@ -29,12 +29,13 @@ Kế hoạch chi tiết và tiến độ hằng tuần: [VietPulse-Plan-and-Trac
 common/      logic dùng chung cho crawler, speed layer và batch layer (envelope, làm sạch, chấm điểm)
 contracts/   hợp đồng dữ liệu dạng máy đọc được (JSON Schema)
 crawlers/    crawler báo điện tử, bình luận và VOZ
+jobs/        Spark job speed-sentiment và công cụ tạo mapping Elasticsearch
 tests/       pytest
 docs/        tài liệu kỹ thuật, kết quả khảo sát
 docker/      file phụ cho docker-compose của môi trường dev
 ```
 
-Các thư mục `jobs/` (Spark job), `api/`, `dashboards/` và `k8s/` được thêm khi tới mốc tương ứng trong kế hoạch.
+Các thư mục `api/`, `dashboards/` và `k8s/` được thêm khi tới mốc tương ứng trong kế hoạch.
 
 ## Bắt đầu
 
@@ -72,3 +73,14 @@ Lần chạy Spark đầu tiên tải jar connector nên mất vài phút; các 
 - Bản dev không có HDFS: job Spark đọc ghi thư mục local, ví dụ `/workspace/data/`.
 
 Quy trình nhánh, commit và pull request: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+## Speed layer bản đầu (M2.3)
+
+Query A đọc ba topic raw, chấm sentiment bằng luật và upsert tài liệu vào `vp-docs`; bản ghi lỗi sang Kafka `dlq.raw` và Elasticsearch `vp-dlq` (alias, ILM 3 ngày).
+
+```bash
+docker compose exec spark python -m jobs.setup_elasticsearch --url http://elasticsearch:9200
+docker compose exec spark spark-submit jobs/speed_sentiment.py
+```
+
+Hướng dẫn chạy, checkpoint, mapping và kiểm thử toàn luồng: [docs/m2.3-speed-sentiment.md](docs/m2.3-speed-sentiment.md).
