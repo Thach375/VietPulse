@@ -14,7 +14,11 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
-      - run: pip install -e ".[crawler,dev]"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - run: pip install -e ".[crawler,streaming,dev]"
       - run: ruff check .
       - run: ruff format --check .
       - run: pytest -q

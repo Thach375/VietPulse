@@ -11,10 +11,11 @@ dependencies = []
 
 [project.optional-dependencies]
 crawler = ["requests>=2.31", "beautifulsoup4>=4.12"]
+streaming = ["pyspark==3.5.3"]
 dev = ["pytest>=8", "ruff>=0.6", "jsonschema>=4.21"]
 
 [tool.setuptools.packages.find]
-include = ["common*", "crawlers*"]
+include = ["common*", "crawlers*", "jobs*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
