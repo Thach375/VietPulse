@@ -1,0 +1,22 @@
+# Spark Operator chart 2.5.2 watches only processing; Helm creates the Spark
+# driver service account and its executor-pod RBAC in that namespace.
+# https://github.com/kubeflow/spark-operator/tree/v2.5.2/charts/spark-operator
+spark:
+  jobNamespaces: [processing]
+  serviceAccount:
+    name: spark
+    create: true
+  rbac:
+    create: true
+controller:
+  nodeSelector: {vietpulse.io/control: "true"}
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 768Mi}
+webhook:
+  nodeSelector: {vietpulse.io/control: "true"}
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 384Mi}
+hook:
+  nodeSelector: {vietpulse.io/control: "true"}
