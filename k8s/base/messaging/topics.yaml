@@ -1,0 +1,79 @@
+# Required project topics: same partitions and retention as docker/kafka/create-topics.sh.
+# Replication is increased for the three-broker deployment; optional YouTube is not enabled.
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: raw.news.articles
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+    retention.ms: 604800000
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: raw.news.comments
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  partitions: 6
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+    retention.ms: 604800000
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: raw.forum.posts
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  partitions: 3
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+    retention.ms: 604800000
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: raw.backfill
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  partitions: 6
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+    retention.ms: 172800000
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: dlq.raw
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  partitions: 1
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+    retention.ms: 1209600000
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: alerts.sentiment
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  partitions: 1
+  replicas: 3
+  config:
+    min.insync.replicas: 2
+    retention.ms: 604800000

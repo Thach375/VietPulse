@@ -1,0 +1,167 @@
+# Kafka and node-pool API: Strimzi 1.2.0.
+# https://strimzi.io/docs/operators/1.2.0/deploying.html#assembly-node-pools-str
+apiVersion: kafka.strimzi.io/v1
+kind: Kafka
+metadata:
+  name: vietpulse
+spec:
+  kafka:
+    version: 4.2.1
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      auto.create.topics.enable: false
+      default.replication.factor: 3
+      min.insync.replicas: 2
+      offsets.topic.replication.factor: 3
+      transaction.state.log.replication.factor: 3
+      transaction.state.log.min.isr: 2
+      unclean.leader.election.enable: false
+  entityOperator:
+    topicOperator:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          cpu: 500m
+          memory: 384Mi
+    template:
+      pod:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                    - key: vietpulse.io/control
+                      operator: In
+                      values: ["true"]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: batch
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  replicas: 1
+  roles: [broker, controller]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        class: local-path
+        size: 40Gi
+        deleteClaim: false
+        kraftMetadata: shared
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 2560Mi
+  jvmOptions:
+    -Xms: 1g
+    -Xmx: 1g
+  template:
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: vietpulse.io/kafka
+                    operator: In
+                    values: ["true"]
+                  - key: vietpulse.io/batch
+                    operator: In
+                    values: ["true"]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: streaming
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  replicas: 1
+  roles: [broker, controller]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        class: local-path
+        size: 25Gi
+        deleteClaim: false
+        kraftMetadata: shared
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "2"
+      memory: 2560Mi
+  jvmOptions:
+    -Xms: 1g
+    -Xmx: 1g
+  template:
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: vietpulse.io/kafka
+                    operator: In
+                    values: ["true"]
+                  - key: vietpulse.io/streaming
+                    operator: In
+                    values: ["true"]
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaNodePool
+metadata:
+  name: data
+  labels:
+    strimzi.io/cluster: vietpulse
+spec:
+  replicas: 1
+  roles: [broker, controller]
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        class: local-path
+        size: 40Gi
+        deleteClaim: false
+        kraftMetadata: shared
+  resources:
+    requests:
+      cpu: 500m
+      memory: 2Gi
+    limits:
+      cpu: "3"
+      memory: 3Gi
+  jvmOptions:
+    -Xms: 1g
+    -Xmx: 1g
+  template:
+    pod:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: vietpulse.io/kafka
+                    operator: In
+                    values: ["true"]
+                  - key: vietpulse.io/data
+                    operator: In
+                    values: ["true"]

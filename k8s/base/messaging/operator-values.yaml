@@ -1,0 +1,14 @@
+# Install with the chart version in infra/versions.yaml; this is Helm input.
+# https://strimzi.io/docs/operators/1.2.0/deploying.html#deploying-cluster-operator-helm-chart-str
+replicas: 1
+watchAnyNamespace: false
+watchNamespaces: [] # Watch only the Helm release namespace: messaging.
+nodeSelector:
+  vietpulse.io/control: "true"
+resources:
+  requests:
+    cpu: 100m
+    memory: 384Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
