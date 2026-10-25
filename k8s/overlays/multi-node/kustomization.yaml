@@ -4,3 +4,5 @@ resources:
   - ../../base/messaging
   - ../../base/storage
   - ../../base/serving
+  - ../../base/processing
+  - ../../base/ingestion

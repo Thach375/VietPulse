@@ -1,0 +1,4 @@
+# Copy to infra/local/application-images.yaml after building/publishing images.
+# Paste the full references from the GHCR workflow output, including @sha256:...
+spark: ""
+crawler: ""

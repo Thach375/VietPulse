@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: spark-client-config}
+data:
+  core-site.xml: |
+    <configuration>
+      <property><name>fs.defaultFS</name><value>hdfs://hdfs-namenode.storage.svc.cluster.local:8020</value></property>
+    </configuration>
+  hive-site.xml: |
+    <configuration>
+      <property><name>hive.metastore.uris</name><value>thrift://hive-metastore.storage.svc:9083</value></property>
+    </configuration>
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: batch-orchestrator}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: batch-orchestrator}
+rules:
+  - apiGroups: [sparkoperator.k8s.io]
+    resources: [sparkapplications]
+    verbs: [get, list, create, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, create, delete]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [reference-refresh-approval]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: batch-orchestrator}
+subjects: [{kind: ServiceAccount, name: batch-orchestrator, namespace: processing}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: batch-orchestrator}

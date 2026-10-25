@@ -1,0 +1,90 @@
+apiVersion: v1
+kind: List
+items:
+  - apiVersion: v1
+    kind: PersistentVolumeClaim
+    metadata: {name: crawler-state}
+    spec:
+      storageClassName: local-path
+      accessModes: [ReadWriteOnce]
+      resources: {requests: {storage: 2Gi}}
+  - apiVersion: batch/v1
+    kind: CronJob
+    metadata: {name: news-articles}
+    spec: &crawler
+      schedule: "*/15 * * * *"
+      timeZone: Asia/Ho_Chi_Minh
+      suspend: true
+      concurrencyPolicy: Forbid
+      startingDeadlineSeconds: 300
+      successfulJobsHistoryLimit: 1
+      failedJobsHistoryLimit: 2
+      jobTemplate:
+        spec:
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              automountServiceAccountToken: false
+              nodeSelector: {vietpulse.io/ingestion: "true"}
+              securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+              containers:
+                - name: crawler
+                  image: REQUIRED_CRAWLER_IMAGE
+                  args: [--source, news-articles, --state-dir, /state]
+                  resources:
+                    requests: {cpu: 100m, memory: 128Mi}
+                    limits: {cpu: 500m, memory: 384Mi}
+                  volumeMounts: [{name: state, mountPath: /state}]
+              volumes: [{name: state, persistentVolumeClaim: {claimName: crawler-state}}]
+  - apiVersion: batch/v1
+    kind: CronJob
+    metadata: {name: news-comments}
+    spec:
+      <<: *crawler
+      schedule: "5,20,35,50 * * * *"
+      jobTemplate:
+        spec:
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              automountServiceAccountToken: false
+              nodeSelector: {vietpulse.io/ingestion: "true"}
+              securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+              containers:
+                - name: crawler
+                  image: REQUIRED_CRAWLER_IMAGE
+                  args: [--source, news-comments, --state-dir, /state]
+                  resources:
+                    requests: {cpu: 100m, memory: 128Mi}
+                    limits: {cpu: 500m, memory: 384Mi}
+                  volumeMounts: [{name: state, mountPath: /state}]
+              volumes: [{name: state, persistentVolumeClaim: {claimName: crawler-state}}]
+  - apiVersion: batch/v1
+    kind: CronJob
+    metadata: {name: voz}
+    spec:
+      <<: *crawler
+      schedule: "10,25,40,55 * * * *"
+      jobTemplate:
+        spec:
+          backoffLimit: 0
+          activeDeadlineSeconds: 900
+          template:
+            spec:
+              restartPolicy: Never
+              automountServiceAccountToken: false
+              nodeSelector: {vietpulse.io/ingestion: "true"}
+              securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+              containers:
+                - name: crawler
+                  image: REQUIRED_CRAWLER_IMAGE
+                  args: [--source, voz, --state-dir, /state]
+                  resources:
+                    requests: {cpu: 100m, memory: 128Mi}
+                    limits: {cpu: 500m, memory: 384Mi}
+                  volumeMounts: [{name: state, mountPath: /state}]
+              volumes: [{name: state, persistentVolumeClaim: {claimName: crawler-state}}]
