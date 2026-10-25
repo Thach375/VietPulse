@@ -109,7 +109,7 @@ foundation_init() {
                 case "$script" in
                     01-*) printf ' --node 1' ;;
                     02-*) printf ' --node {2|3|4}' ;;
-                    verify-*) printf ' [--check-network] [--check-storage]' ;;
+                    verify-cluster.sh) printf ' [--check-network] [--check-storage]' ;;
                 esac
                 printf '\nDefault inventory: infra/.env; dry runs never connect to hosts.\n'
                 exit 0 ;;
@@ -130,17 +130,19 @@ foundation_init() {
     [[ $(foundation_pin flannel_backend) == vxlan ]] || fail 'Only the configured VXLAN foundation is supported'
 }
 
-# Deliberately read only quoted, two-space foundation scalars, not arbitrary YAML.
-foundation_pin() {
-    awk -v key="$1" '
-        /^foundation:$/ {section=1; next}
+# Deliberately read only quoted, two-space version scalars, not arbitrary YAML.
+version_pin() {
+    awk -v section_name="$1" -v key="$2" '
+        $0 == section_name ":" {section=1; next}
         /^[^ #]/ {section=0}
         section && $0 ~ "^  " key ": \"[^\"]+\"$" {
             value=$0; sub(/^[^:]+: "/, "", value); sub(/"$/, "", value); count++
         }
         END {if (count != 1) exit 1; print value}
-    ' "$repo_root/infra/versions.yaml" || fail "Missing or duplicate foundation.$1 pin"
+    ' "$repo_root/infra/versions.yaml" || fail "Missing or duplicate $1.$2 pin"
 }
+
+foundation_pin() { version_pin foundation "$1"; }
 
 node_labels() {
     case "$1" in

@@ -358,3 +358,137 @@ for script in infra/scripts/*.sh infra/scripts/lib/*.sh; do bash -n "$script"; d
 shellcheck -x -P SCRIPTDIR infra/scripts/*.sh infra/scripts/lib/*.sh
 python -m pytest tests/test_preflight.py tests/test_k3s_foundation.py -q
 ```
+
+## Kafka KRaft (Task 3)
+
+The `multi-node` overlay deploys Kafka **4.2.1** using Strimzi **1.2.0** into
+`messaging`. It contains one Kafka resource, three single-instance node pools,
+and the six required project topics. Helm values are separate from the Kustomize
+resources. The Cluster Operator and Topic Operator select Node 1's control role;
+the broker/controllers select these roles:
+
+| Pool | Required labels | Expected node | Local-path PVC | Memory request / limit |
+| --- | --- | --- | --- | --- |
+| `batch` | `kafka=true`, `batch=true` | 2 | 40Gi | 2Gi / 2560Mi |
+| `streaming` | `kafka=true`, `streaming=true` | 3 | 25Gi | 2Gi / 2560Mi |
+| `data` | `kafka=true`, `data=true` | 4 | 40Gi | 2Gi / 3Gi |
+
+All role keys have the `vietpulse.io/` prefix. Each broker/controller has a 1Gi
+Java heap; its memory limit also allows space for native memory and page cache.
+PVCs have `deleteClaim: false`. Do not rename the Kafka cluster or node pools,
+change their roles, recreate topics, prune resources, or delete PVCs to redeploy.
+These operations are not part of this task's rerun procedure.
+
+Clients inside Kubernetes use
+`vietpulse-kafka-bootstrap.messaging.svc:9092`. The listener uses plaintext with
+no authentication inside the trusted demo cluster; no external listener is
+configured. Topic auto-creation is disabled. All six project topics use
+replication factor 3 and minimum ISR 2; producers requiring that durability must
+use `acks=all`. Partitions and retention match `docker/kafka/create-topics.sh`.
+The optional YouTube and Compose-only `dev.smoke` topics are not deployed.
+
+### Local checks before the workers are available
+
+Install the existing development dependencies, including PyYAML for manifest
+checks, in a virtual environment:
+
+```bash
+python -m pip install -e '.[crawler,dev]'
+python -m pytest tests/test_preflight.py tests/test_k3s_foundation.py tests/test_kafka_deployment.py -q
+ruff check .
+ruff format --check .
+for script in infra/scripts/*.sh infra/scripts/lib/*.sh; do bash -n "$script"; done
+shellcheck -x -P SCRIPTDIR infra/scripts/*.sh infra/scripts/lib/*.sh
+kubectl kustomize k8s/overlays/multi-node
+helm template strimzi strimzi-kafka-operator --repo https://strimzi.io/charts/ --version 1.2.0 \
+  --namespace messaging --kube-version 1.35.9 -f k8s/base/messaging/operator-values.yaml
+```
+
+For a real Kafka test on Node 1 without Docker, root privileges, K3s or workers,
+download the official `kafka_2.13-4.2.1.tgz` distribution from
+[Apache Kafka](https://downloads.apache.org/kafka/4.2.1/) and verify its published
+SHA-512 checksum before extracting it. With Java 17+ and the development virtual
+environment active, run:
+
+```bash
+python tests/integration/kafka_local_smoke.py --kafka-home /absolute/path/to/kafka_2.13-4.2.1
+```
+
+This starts three broker/controller processes on randomly selected loopback
+ports, creates the topics directly from the deployment manifests, verifies the
+live partition/retention/replication settings, and produces/consumes unique
+markers in an isolated probe topic. It stops one broker, verifies writes with
+`acks=all` still work, restarts that broker using the same data directory, and
+repeats topic creation. Existing topic IDs and both markers must survive. The
+test stops its own processes on exit and retains its unique temporary log/data
+directory for diagnosis. It needs about 2-3GiB available memory.
+
+Passing these local checks does **not** demonstrate Strimzi reconciliation,
+cross-node networking, Kubernetes scheduling, or PVC persistence. Task 3's live
+acceptance checks remain pending until all four nodes are available and Task 2
+has passed. Do not weaken the multi-node affinity or replication settings to
+make that verification pass on one machine.
+
+### Deploy after Task 2 passes
+
+Run the existing foundation check first from the repository root:
+
+```bash
+bash infra/scripts/verify-cluster.sh --check-network --check-storage
+```
+
+Stop on failure. Before the initial installation, inspect any existing Strimzi
+release or `Kafka/vietpulse` resources. Continue only for a new deployment or a
+rerun of this same pinned, operator-managed deployment; conflicting existing
+state requires inspection rather than overwriting it.
+
+On **Node 1**, with Helm at the version in `infra/versions.yaml` and the repository
+checked out, install the pinned operator using the existing root-only kubeconfig:
+
+```bash
+source infra/scripts/lib/common.sh
+repo_root=$PWD
+strimzi_chart=$(version_pin messaging helm_chart)
+strimzi_repository=$(version_pin messaging helm_repository)
+strimzi_version=$(version_pin messaging chart_version)
+sudo helm upgrade --install strimzi "$strimzi_chart" \
+  --repo "$strimzi_repository" --version "$strimzi_version" \
+  --kubeconfig /etc/rancher/k3s/k3s.yaml --namespace messaging \
+  -f k8s/base/messaging/operator-values.yaml --wait --timeout 5m
+sudo k3s kubectl wait --for=condition=Established --timeout=60s \
+  crd/kafkas.kafka.strimzi.io crd/kafkanodepools.kafka.strimzi.io crd/kafkatopics.kafka.strimzi.io
+sudo k3s kubectl apply -k k8s/overlays/multi-node
+bash infra/scripts/verify-kafka.sh
+```
+
+The verifier uses the same literal `infra/.env`, strict SSH options and Node 1
+administration as the foundation scripts; `--env-file FILE` and `--dry-run` are
+supported. A dry run validates configuration without connecting to any host.
+Live verification rejects missing workers, wrong versions, stale Ready status,
+wrong node placement, pending/wrong-sized PVCs, drifted topic settings, missing
+partitions and under-replicated partitions. Waits are bounded and failures exit
+nonzero. A snapshot check is not continuous health monitoring.
+
+Run deployment/verification operations **one at a time**. The verifier creates
+only its labelled `messaging/vietpulse.infra.verify` KafkaTopic and
+`messaging/vp-kafka-verification` ConfigMap. It checks resource ownership before
+writing, uses one compacted key to retain the latest successful marker, and
+does not send synthetic records into the project topics. Later runs read that
+previous marker before producing a fresh UUID. They fail if it is missing or
+changed. These probe resources are deliberately retained; do not delete them
+between a deployment and its preservation check.
+
+To verify repeated deployment, run the verifier successfully once, then on Node 1:
+
+```bash
+sudo k3s kubectl apply -k k8s/overlays/multi-node
+bash infra/scripts/verify-kafka.sh
+```
+
+The second verification must confirm the previous marker survived and produce
+and consume a new marker. It never deletes topics, pods, PVCs or PVs. Broker
+restart tests on the real cluster belong to the later acceptance suite.
+
+References: [Strimzi node pools and storage](https://strimzi.io/docs/operators/1.2.0/deploying.html#assembly-node-pools-str),
+[Strimzi topic management](https://strimzi.io/docs/operators/1.2.0/deploying.html#using-the-topic-operator-str),
+and [Kafka KRaft initialization](https://kafka.apache.org/42/operations/kraft/).
