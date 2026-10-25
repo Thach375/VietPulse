@@ -10,8 +10,7 @@ def test_defaults_read_live_sources_only():
     config = parse_args([])
     assert config.topics == ("raw.news.articles", "raw.news.comments", "raw.forum.posts")
     assert config.starting_offsets == "earliest"
-    assert config.es_options()["es.mapping.id"] == "document_id"
-    assert config.es_options()["es.index.auto.create"] == "false"
+    assert config.es_url == "http://elasticsearch:9200"
 
 
 def test_cli_accepts_separate_checkpoint_and_optional_source():
@@ -43,11 +42,8 @@ def test_invalid_elasticsearch_url_is_rejected(url):
         JobConfig(es_url=url)
 
 
-def test_https_connector_options():
-    options = JobConfig(es_url="https://elasticsearch:9243").es_options()
-    assert options["es.nodes"] == "elasticsearch"
-    assert options["es.port"] == "9243"
-    assert options["es.net.ssl"] == "true"
+def test_https_endpoint_allowed():
+    assert JobConfig(es_url="https://elasticsearch:9243").es_url == "https://elasticsearch:9243"
 
 
 def test_setup_preserves_existing_index_and_configures_dlq_retention(monkeypatch):

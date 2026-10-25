@@ -6,7 +6,8 @@ Chạy trước khi submit job: python -m jobs.setup_elasticsearch --url http://
 import argparse
 import json
 from urllib.error import HTTPError
-from urllib.request import Request, urlopen
+
+from jobs.es_http import request_json as _request_json
 
 DOCS_MAPPING = {
     "dynamic": False,
@@ -45,12 +46,7 @@ DLQ_MAPPING = {
 
 
 def request_json(url: str, path: str, body=None, method: str = "GET"):
-    data = json.dumps(body).encode("utf-8") if body is not None else None
-    request = Request(
-        url.rstrip("/") + path, data=data, method=method, headers={"Content-Type": "application/json"}
-    )
-    with urlopen(request, timeout=30) as response:
-        return json.load(response)
+    return _request_json(url, path, body, method)
 
 
 def setup_elasticsearch(url: str, docs_index: str = "vp-docs", dlq_index: str = "vp-dlq") -> None:

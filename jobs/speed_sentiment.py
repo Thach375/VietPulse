@@ -19,6 +19,7 @@ from common.spark_processing import (
     build_documents,
     parse_kafka_records,
 )
+from jobs.es_http import bulk_index_partition
 
 LOGGER = logging.getLogger(__name__)
 
@@ -49,29 +50,17 @@ class JobConfig:
         if target.username or target.password or target.query or target.fragment:
             raise ValueError("es_url không chứa thông tin đăng nhập, query hay fragment")
 
-    def es_options(self):
-        target = urlsplit(self.es_url)
-        return {
-            "es.nodes": target.hostname,
-            "es.port": str(target.port or (443 if target.scheme == "https" else 9200)),
-            "es.net.ssl": str(target.scheme == "https").lower(),
-            "es.nodes.wan.only": "true",
-            "es.mapping.id": "document_id",
-            "es.spark.dataframe.write.null": "true",
-            "es.write.operation": "index",
-            "es.index.auto.create": "false",
-        }
-
 
 def write_documents(documents: DataFrame, config: JobConfig):
-    documents.write.format("es").mode("append").options(**config.es_options()).save(config.docs_index)
+    documents.foreachPartition(lambda rows: bulk_index_partition(rows, config.es_url, config.docs_index))
 
 
 def write_dlq(errors: DataFrame, config: JobConfig):
     # Ngày Kafka ổn định qua retry, không đổi index nếu batch được chạy lại sang ngày khác.
     indexed = errors.withColumn("index_day", F.date_format("kafka_timestamp", "yyyy.MM.dd"))
-    options = {**config.es_options(), "es.index.auto.create": "true", "es.mapping.exclude": "index_day"}
-    indexed.write.format("es").mode("append").options(**options).save(f"{config.dlq_index}-{{index_day}}")
+    indexed.foreachPartition(
+        lambda rows: bulk_index_partition(rows, config.es_url, config.dlq_index, "index_day")
+    )
     fields = [name for name in errors.columns if name != "document_id"]
     errors.select(
         F.col("document_id").alias("key"),
