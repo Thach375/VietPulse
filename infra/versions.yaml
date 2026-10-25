@@ -41,6 +41,12 @@ storage:
   hadoop: "3.3.6"
   hive_metastore: "4.0.1"
   postgresql: "16.15"
+  hadoop_image: "apache/hadoop:3.3.6"
+  metastore_image: "apache/hive:4.0.1"
+  postgresql_image: "postgres:16.15-bookworm"
+  download_image: "curlimages/curl:8.12.1"
+  postgresql_jdbc: "42.7.8"
+  postgresql_jdbc_sha256: "2a32a9dcbc42d67a50ad3a0de5efd102c8d2be46720045f2cbd6689f160ab7c7"
   # Hive 4.0.1 is documented with Hadoop 3.3.6; Spark 4.0.4 supports HMS 4.0.1.
   # Task 4 must package the matching metastore client/JDBC jars and test schema
   # creation; Task 6 must use metastore.version=4.0.1 and compatible client jars.
@@ -57,6 +63,13 @@ serving:
   elastic_operator_chart_version: "3.5.0"
   elasticsearch: "8.19.23"
   kibana: "8.19.23"
+  mongodb_image: "quay.io/mongodb/mongodb-community-server:7.0.45-ubi8"
+  elasticsearch_image: "docker.elastic.co/elasticsearch/elasticsearch:8.19.23"
+  kibana_image: "docker.elastic.co/kibana/kibana:8.19.23"
+  mongodb_probe_image: "mongo:7.0.45"
+  http_probe_image: "curlimages/curl:8.12.1"
+  mongosh: "2.5.9"
+  mongosh_sha256: "0644b6ac0b99dd52f46bdc4085aae19bb6d51226ef346c51418321769e76363e"
 
 monitoring:
   prometheus_repository: "https://prometheus-community.github.io/helm-charts"

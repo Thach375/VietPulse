@@ -1,0 +1,264 @@
+# Hadoop configuration is also consumed by the native local smoke test.
+# https://hadoop.apache.org/docs/r3.3.6/hadoop-project-dist/hadoop-hdfs/HdfsUserGuide.html
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hdfs-config
+data:
+  core-site.xml: |
+    <configuration>
+      <property><name>fs.defaultFS</name><value>hdfs://hdfs-namenode.storage.svc.cluster.local:8020</value></property>
+    </configuration>
+  hdfs-site.xml: |
+    <configuration>
+      <property><name>dfs.replication</name><value>2</value></property>
+      <property><name>dfs.namenode.name.dir</name><value>file:///data/name</value></property>
+      <property><name>dfs.datanode.data.dir</name><value>file:///data/blocks</value></property>
+      <property><name>dfs.namenode.rpc-address</name><value>hdfs-namenode.storage.svc.cluster.local:8020</value></property>
+      <property><name>dfs.namenode.rpc-bind-host</name><value>0.0.0.0</value></property>
+      <property><name>dfs.namenode.http-address</name><value>0.0.0.0:9870</value></property>
+      <property><name>dfs.namenode.acls.enabled</name><value>true</value></property>
+      <property><name>dfs.namenode.safemode.min.datanodes</name><value>2</value></property>
+      <property><name>dfs.namenode.datanode.registration.ip-hostname-check</name><value>false</value></property>
+    </configuration>
+  start-hdfs.sh: |
+    #!/usr/bin/env bash
+    set +xv
+    set -euo pipefail
+    if [[ $1 == namenode ]]; then
+      name_dir=${HDFS_DATA_ROOT:-/data}/name
+      mkdir -p "$name_dir"
+      if [[ ! -f $name_dir/current/VERSION ]]; then
+        if [[ -n $(find "$name_dir" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+          printf 'ERROR: refusing to format a nonempty NameNode directory without VERSION.\n' >&2
+          exit 1
+        fi
+        hdfs namenode -format -nonInteractive -clusterid vietpulse-hdfs
+      fi
+    fi
+    exec hdfs "$1"
+  bootstrap-hdfs.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    timeout 180 hdfs dfsadmin -safemode wait
+    for directory in raw clean curated reference models checkpoints checkpoints/raw-ingest checkpoints/speed-sentiment-a checkpoints/speed-sentiment-b; do
+      hdfs dfs -mkdir -p "/vietpulse/$directory"
+      hdfs dfs -chown spark:supergroup "/vietpulse/$directory"
+      hdfs dfs -chmod 775 "/vietpulse/$directory"
+    done
+    # Hive and Spark can both manage clean/curated data; future files inherit access.
+    for directory in clean curated; do
+      hdfs dfs -setfacl -m user:hive:rwx,default:user:hive:rwx,default:user:spark:rwx "/vietpulse/$directory"
+    done
+    hdfs dfs -mkdir -p /tmp /warehouse/tablespace/managed/hive /warehouse/tablespace/external/hive
+    hdfs dfs -chmod 1777 /tmp
+    hdfs dfs -chown -R hive:supergroup /warehouse
+    hdfs dfs -chmod 775 /warehouse /warehouse/tablespace /warehouse/tablespace/managed /warehouse/tablespace/external
+    hdfs dfs -mkdir -p /vietpulse/.infra-checks/catalog
+    hdfs dfs -chown hive:supergroup /vietpulse/.infra-checks/catalog
+  probe-hdfs.sh: |
+    #!/usr/bin/env bash
+    set -euo pipefail
+    timeout 180 hdfs dfsadmin -safemode wait
+    [[ $(hdfs getconf -confKey dfs.replication) == 2 ]]
+    for directory in raw clean curated reference models checkpoints/raw-ingest checkpoints/speed-sentiment-a checkpoints/speed-sentiment-b; do
+      hdfs dfs -test -d "/vietpulse/$directory"
+    done
+    # A reserved probe directory keeps synthetic records outside dataset partitions.
+    hdfs dfs -mkdir -p /vietpulse/.infra-checks
+    marker="vp-storage-$(cat /proc/sys/kernel/random/uuid)"
+    file="/vietpulse/.infra-checks/$marker"
+    printf '%s' "$marker" | hdfs dfs -put - "$file"
+    [[ $(hdfs dfs -cat "$file") == "$marker" ]]
+    timeout 120 hdfs dfs -setrep -w 2 "$file"
+    hdfs fsck "$file" -files -blocks -locations
+    printf 'PASS: HDFS marker %s matched and has two live replicas.\n' "$file"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hdfs-namenode
+spec:
+  selector: {app: hdfs-namenode}
+  ports:
+    - {name: rpc, port: 8020}
+    - {name: http, port: 9870}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hdfs-datanodes
+spec:
+  clusterIP: None
+  selector: {vietpulse.io/component: hdfs-datanode}
+  ports:
+    - {name: data, port: 9866}
+    - {name: ipc, port: 9867}
+    - {name: http, port: 9864}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hdfs-namenode
+spec:
+  serviceName: hdfs-namenode
+  replicas: 1
+  selector:
+    matchLabels: {app: hdfs-namenode}
+  template:
+    metadata:
+      labels: {app: hdfs-namenode}
+    spec:
+      nodeSelector: {vietpulse.io/data: "true", vietpulse.io/storage: "true"}
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: namenode
+          image: apache/hadoop:3.3.6
+          command: [bash, /etc/hadoop/conf/start-hdfs.sh, namenode]
+          env:
+            - {name: HADOOP_CONF_DIR, value: /etc/hadoop/conf}
+            - {name: HADOOP_USER_NAME, value: hdfs}
+            - {name: HADOOP_HEAPSIZE_MAX, value: "1024"}
+          ports:
+            - {name: rpc, containerPort: 8020}
+            - {name: http, containerPort: 9870}
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            limits: {cpu: "2", memory: 2Gi}
+          startupProbe: {tcpSocket: {port: rpc}, periodSeconds: 5, failureThreshold: 60}
+          readinessProbe: {tcpSocket: {port: rpc}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 15, failureThreshold: 4}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/hadoop/conf, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: hdfs-config}}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: {requests: {storage: 10Gi}}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hdfs-datanode-batch
+spec:
+  serviceName: hdfs-datanodes
+  replicas: 1
+  selector:
+    matchLabels: {app: hdfs-datanode-batch}
+  template:
+    metadata:
+      labels: {app: hdfs-datanode-batch, vietpulse.io/component: hdfs-datanode}
+    spec:
+      nodeSelector: {vietpulse.io/batch: "true", vietpulse.io/storage: "true"}
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: datanode
+          image: apache/hadoop:3.3.6
+          command: [bash, /etc/hadoop/conf/start-hdfs.sh, datanode]
+          env:
+            - {name: HADOOP_CONF_DIR, value: /etc/hadoop/conf}
+            - {name: HADOOP_HEAPSIZE_MAX, value: "768"}
+          ports:
+            - {name: data, containerPort: 9866}
+            - {name: http, containerPort: 9864}
+          resources:
+            requests: {cpu: 200m, memory: 1Gi}
+            limits: {cpu: "1", memory: 1536Mi}
+          startupProbe: {tcpSocket: {port: data}, periodSeconds: 5, failureThreshold: 60}
+          readinessProbe: {tcpSocket: {port: data}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 15, failureThreshold: 4}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/hadoop/conf, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: hdfs-config}}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: {requests: {storage: 200Gi}}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hdfs-datanode-data
+spec:
+  serviceName: hdfs-datanodes
+  replicas: 1
+  selector:
+    matchLabels: {app: hdfs-datanode-data}
+  template:
+    metadata:
+      labels: {app: hdfs-datanode-data, vietpulse.io/component: hdfs-datanode}
+    spec:
+      nodeSelector: {vietpulse.io/data: "true", vietpulse.io/storage: "true"}
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: datanode
+          image: apache/hadoop:3.3.6
+          command: [bash, /etc/hadoop/conf/start-hdfs.sh, datanode]
+          env:
+            - {name: HADOOP_CONF_DIR, value: /etc/hadoop/conf}
+            - {name: HADOOP_HEAPSIZE_MAX, value: "1024"}
+          ports:
+            - {name: data, containerPort: 9866}
+            - {name: http, containerPort: 9864}
+          resources:
+            requests: {cpu: 200m, memory: 1Gi}
+            limits: {cpu: "2", memory: 2Gi}
+          startupProbe: {tcpSocket: {port: data}, periodSeconds: 5, failureThreshold: 60}
+          readinessProbe: {tcpSocket: {port: data}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: http}, periodSeconds: 15, failureThreshold: 4}
+          volumeMounts:
+            - {name: data, mountPath: /data}
+            - {name: config, mountPath: /etc/hadoop/conf, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: hdfs-config}}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: {requests: {storage: 200Gi}}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hdfs-bootstrap
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels: {app: hdfs-bootstrap}
+    spec:
+      restartPolicy: OnFailure
+      nodeSelector: {vietpulse.io/data: "true"}
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000}
+      containers:
+        - name: bootstrap
+          image: apache/hadoop:3.3.6
+          command: [bash, /etc/hadoop/conf/bootstrap-hdfs.sh]
+          env:
+            - {name: HADOOP_CONF_DIR, value: /etc/hadoop/conf}
+            - {name: HADOOP_USER_NAME, value: hdfs}
+            - {name: HADOOP_HEAPSIZE_MAX, value: "256"}
+          resources:
+            requests: {cpu: 100m, memory: 384Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/hadoop/conf, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: hdfs-config}}

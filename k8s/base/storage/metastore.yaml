@@ -1,0 +1,223 @@
+# Override the upstream tracing entrypoint: credentials are rendered into a private file.
+# https://github.com/apache/hive/blob/rel/release-4.0.1/packaging/src/docker/README.md
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hive-config
+data:
+  start-metastore.sh: |
+    #!/usr/bin/env bash
+    set +xv
+    set -euo pipefail
+    umask 077
+    export HIVE_CONF_DIR=${HIVE_RUNTIME_CONF:-/tmp/hive-conf}
+    mkdir -p "$HIVE_CONF_DIR"
+    cp "$HADOOP_CONF_DIR/core-site.xml" "$HADOOP_CONF_DIR/hdfs-site.xml" "$HIVE_CONF_DIR/"
+    [[ $PGUSER =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ && $PGDATABASE =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]]
+    password=$(cat "${PGPASSWORD_FILE:-/credentials/password}")
+    password=${password//&/\&amp;}
+    password=${password//</\&lt;}
+    password=${password//>/\&gt;}
+    cat > "$HIVE_CONF_DIR/hive-site.xml" <<XML
+    <configuration>
+      <property><name>javax.jdo.option.ConnectionDriverName</name><value>org.postgresql.Driver</value></property>
+      <property><name>javax.jdo.option.ConnectionURL</name><value>jdbc:postgresql://${PGHOST:-hive-postgresql}:${PGPORT:-5432}/$PGDATABASE</value></property>
+      <property><name>javax.jdo.option.ConnectionUserName</name><value>$PGUSER</value></property>
+      <property><name>javax.jdo.option.ConnectionPassword</name><value>$password</value></property>
+      <property><name>hive.metastore.warehouse.dir</name><value>/warehouse/tablespace/managed/hive</value></property>
+      <property><name>hive.metastore.warehouse.external.dir</name><value>/warehouse/tablespace/external/hive</value></property>
+      <property><name>hive.metastore.schema.verification</name><value>true</value></property>
+      <property><name>datanucleus.schema.autoCreateAll</name><value>false</value></property>
+      <property><name>hive.metastore.event.db.notification.api.auth</name><value>false</value></property>
+      <property><name>metastore.thrift.bind.host</name><value>${METASTORE_BIND_HOST:-0.0.0.0}</value></property>
+    </configuration>
+    XML
+    unset password
+    export HIVE_AUX_JARS_PATH=${HIVE_AUX_JARS_PATH:-/jdbc/postgresql.jar}
+    export HADOOP_CLASSPATH="$HIVE_AUX_JARS_PATH:${HADOOP_CLASSPATH:-}"
+    if [[ $(cat "${HIVE_SCHEMA_STATE:-/jdbc/schema-state}") == empty ]] && ! schematool -dbType postgres -info; then
+      schematool -dbType postgres -initSchema
+    fi
+    # Existing incompatible/partial schemas fail validation; never auto-upgrade them.
+    schematool -dbType postgres -validate
+    exec hive --service metastore -p "${METASTORE_PORT:-9083}"
+  probe-catalog.sh: |
+    #!/usr/bin/env bash
+    set +xv
+    set -euo pipefail
+    # Hive 4's wrapper redirects "cli" to Beeline. Invoke the bundled CliDriver
+    # directly, as ext/cli.sh does, for DDL without a HiveServer2 daemon.
+    # https://github.com/apache/hive/blob/rel/release-4.0.1/bin/ext/cli.sh
+    query=${1:-"CREATE DATABASE IF NOT EXISTS vp_infra_probe;
+      CREATE EXTERNAL TABLE IF NOT EXISTS vp_infra_probe.storage_marker (vp_marker STRING)
+      STORED AS TEXTFILE LOCATION '/vietpulse/.infra-checks/catalog';
+      DESCRIBE vp_infra_probe.storage_marker;"}
+    export HADOOP_CLASSPATH="${HIVE_CONF_DIR:-/tmp/hive-conf}:$HIVE_HOME/lib/*:${HADOOP_CLASSPATH:-}"
+    output=$(hadoop jar "$HIVE_HOME"/lib/hive-cli-*.jar org.apache.hadoop.hive.cli.CliDriver \
+      --hiveconf "hive.metastore.uris=${HIVE_METASTORE_URI:-thrift://hive-metastore:9083}" \
+      --hiveconf hive.execution.engine=mr \
+      -e "$query")
+    printf '%s\n' "$output"
+    printf '%s\n' "$output" | grep -Eq '^vp_marker[[:space:]]+string'
+    printf 'PASS: catalog create/read through Hive Metastore Thrift succeeded.\n'
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hive-postgresql
+spec:
+  selector: {app: hive-postgresql}
+  ports: [{name: postgres, port: 5432}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hive-metastore
+spec:
+  selector: {app: hive-metastore}
+  ports: [{name: thrift, port: 9083}]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: hive-postgresql
+spec:
+  serviceName: hive-postgresql
+  replicas: 1
+  selector:
+    matchLabels: {app: hive-postgresql}
+  template:
+    metadata:
+      labels: {app: hive-postgresql}
+    spec:
+      nodeSelector: {vietpulse.io/data: "true"}
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 999, runAsGroup: 999, fsGroup: 999}
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgresql
+          image: postgres:16.15-bookworm
+          env:
+            - name: POSTGRES_USER
+              valueFrom: {secretKeyRef: {name: hive-metastore-db, key: username}}
+            - name: POSTGRES_DB
+              valueFrom: {secretKeyRef: {name: hive-metastore-db, key: database}}
+            - {name: POSTGRES_PASSWORD_FILE, value: /credentials/password}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+            - {name: POSTGRES_INITDB_ARGS, value: --auth-host=scram-sha-256}
+          ports: [{name: postgres, containerPort: 5432}]
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          startupProbe:
+            exec: {command: [sh, -ec, 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: {command: [sh, -ec, 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"']}
+            periodSeconds: 5
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: credentials, mountPath: /credentials, readOnly: true}
+      volumes:
+        - name: credentials
+          secret: {secretName: hive-metastore-db, defaultMode: 0440}
+  volumeClaimTemplates:
+    - metadata: {name: data}
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: local-path
+        resources: {requests: {storage: 10Gi}}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hive-metastore
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: hive-metastore}
+  template:
+    metadata:
+      labels: {app: hive-metastore}
+    spec:
+      nodeSelector: {vietpulse.io/data: "true"}
+      automountServiceAccountToken: false
+      securityContext: {runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
+      terminationGracePeriodSeconds: 60
+      initContainers:
+        - name: postgresql-jdbc
+          image: curlimages/curl:8.12.1
+          command:
+            - sh
+            - -ec
+            - |
+              curl --fail --silent --show-error --location --retry 3 --max-time 120 \
+                https://repo.maven.apache.org/maven2/org/postgresql/postgresql/42.7.8/postgresql-42.7.8.jar \
+                -o /jdbc/postgresql.jar
+              echo '2a32a9dcbc42d67a50ad3a0de5efd102c8d2be46720045f2cbd6689f160ab7c7  /jdbc/postgresql.jar' | sha256sum -c -
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          volumeMounts: [{name: jdbc, mountPath: /jdbc}]
+        - name: wait-postgresql
+          image: postgres:16.15-bookworm
+          command:
+            - bash
+            - -ec
+            - |
+              set +xv
+              export PGPASSWORD=$(cat /credentials/password)
+              for attempt in {1..60}; do
+                if count=$(psql -Atqc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'"); then
+                  if [[ $count == 0 ]]; then echo empty; else echo existing; fi > /jdbc/schema-state
+                  exit 0
+                fi
+                sleep 3
+              done
+              echo 'ERROR: PostgreSQL did not become available.' >&2
+              exit 1
+          env:
+            - {name: PGHOST, value: hive-postgresql}
+            - name: PGUSER
+              valueFrom: {secretKeyRef: {name: hive-metastore-db, key: username}}
+            - name: PGDATABASE
+              valueFrom: {secretKeyRef: {name: hive-metastore-db, key: database}}
+          resources:
+            requests: {cpu: 25m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          volumeMounts:
+            - {name: credentials, mountPath: /credentials, readOnly: true}
+            - {name: jdbc, mountPath: /jdbc}
+      containers:
+        - name: metastore
+          image: apache/hive:4.0.1
+          command: [bash, /etc/hive-scripts/start-metastore.sh]
+          env:
+            - {name: HADOOP_CONF_DIR, value: /etc/hadoop/conf}
+            - {name: HADOOP_USER_NAME, value: hive}
+            - {name: HADOOP_HEAPSIZE_MAX, value: "768"}
+            - {name: HADOOP_CLIENT_OPTS, value: -Xmx768m}
+            - name: PGUSER
+              valueFrom: {secretKeyRef: {name: hive-metastore-db, key: username}}
+            - name: PGDATABASE
+              valueFrom: {secretKeyRef: {name: hive-metastore-db, key: database}}
+          ports: [{name: thrift, containerPort: 9083}]
+          resources:
+            requests: {cpu: 200m, memory: 1Gi}
+            limits: {cpu: "2", memory: 1536Mi}
+          startupProbe: {tcpSocket: {port: thrift}, periodSeconds: 5, failureThreshold: 90}
+          readinessProbe: {tcpSocket: {port: thrift}, periodSeconds: 5}
+          livenessProbe: {tcpSocket: {port: thrift}, periodSeconds: 15, failureThreshold: 4}
+          volumeMounts:
+            - {name: config, mountPath: /etc/hadoop/conf, readOnly: true}
+            - {name: hive-scripts, mountPath: /etc/hive-scripts, readOnly: true}
+            - {name: credentials, mountPath: /credentials, readOnly: true}
+            - {name: jdbc, mountPath: /jdbc, readOnly: true}
+      volumes:
+        - {name: config, configMap: {name: hdfs-config}}
+        - {name: hive-scripts, configMap: {name: hive-config}}
+        - {name: jdbc, emptyDir: {}}
+        - name: credentials
+          secret: {secretName: hive-metastore-db, defaultMode: 0440}

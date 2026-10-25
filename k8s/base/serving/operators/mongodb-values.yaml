@@ -1,0 +1,14 @@
+# Chart mongodb-kubernetes 1.14.0. Community reconciliation only, no Ops Manager.
+operator:
+  watchedResources: [mongodbcommunity]
+  watchNamespace: serving
+  nodeSelector: {vietpulse.io/control: "true"}
+  enableClusterMongoDBRoles: false
+  enablePVCResize: false
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 512Mi}
+community:
+  mongodb:
+    imageType: ubi8
+  createResource: false

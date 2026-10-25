@@ -457,7 +457,7 @@ sudo helm upgrade --install strimzi "$strimzi_chart" \
   -f k8s/base/messaging/operator-values.yaml --wait --timeout 5m
 sudo k3s kubectl wait --for=condition=Established --timeout=60s \
   crd/kafkas.kafka.strimzi.io crd/kafkanodepools.kafka.strimzi.io crd/kafkatopics.kafka.strimzi.io
-sudo k3s kubectl apply -k k8s/overlays/multi-node
+sudo k3s kubectl apply -k k8s/base/messaging
 bash infra/scripts/verify-kafka.sh
 ```
 
@@ -481,7 +481,7 @@ between a deployment and its preservation check.
 To verify repeated deployment, run the verifier successfully once, then on Node 1:
 
 ```bash
-sudo k3s kubectl apply -k k8s/overlays/multi-node
+sudo k3s kubectl apply -k k8s/base/messaging
 bash infra/scripts/verify-kafka.sh
 ```
 
@@ -492,3 +492,356 @@ restart tests on the real cluster belong to the later acceptance suite.
 References: [Strimzi node pools and storage](https://strimzi.io/docs/operators/1.2.0/deploying.html#assembly-node-pools-str),
 [Strimzi topic management](https://strimzi.io/docs/operators/1.2.0/deploying.html#using-the-topic-operator-str),
 and [Kafka KRaft initialization](https://kafka.apache.org/42/operations/kraft/).
+
+## HDFS and Hive catalog (Task 4)
+
+The `storage` base adds Hadoop **3.3.6**, Hive Metastore **4.0.1** and PostgreSQL
+**16.15**. The existing version pins remain authoritative; the deployment tests
+also check the images and JDBC checksum against `infra/versions.yaml`.
+
+| Workload | Required role labels | Expected node | PVC | Memory request / limit |
+| --- | --- | --- | --- | --- |
+| NameNode | `data=true`, `storage=true` | 4 | 10Gi | 1Gi / 2Gi |
+| DataNode batch | `batch=true`, `storage=true` | 2 | 200Gi | 1Gi / 1536Mi |
+| DataNode data | `data=true`, `storage=true` | 4 | 200Gi | 1Gi / 2Gi |
+| PostgreSQL | `data=true` | 4 | 10Gi | 256Mi / 512Mi |
+| Hive Metastore | `data=true` | 4 | PostgreSQL + HDFS | 1Gi / 1536Mi |
+
+Role keys have the `vietpulse.io/` prefix. All PVCs use `local-path` and remain
+attached to their intended physical node. StatefulSet PVC retention defaults to
+Retain; do not delete claims/PVs or rename StatefulSets during a rerun. The
+Metastore itself is stateless: metadata lives in PostgreSQL, and table files live
+in HDFS. No separate local warehouse PVC is needed.
+
+Internal client addresses:
+
+```text
+hdfs://hdfs-namenode.storage.svc.cluster.local:8020
+thrift://hive-metastore.storage.svc.cluster.local:9083
+hive-postgresql.storage.svc.cluster.local:5432
+```
+
+These Services are cluster-internal. HDFS has two DataNodes and replication
+factor **2**, including a two-DataNode safemode startup gate. This is the trusted
+LAN demo baseline with Hadoop simple authentication. NameNode administration
+uses `HADOOP_USER_NAME=hdfs`; future Spark workloads must use
+`HADOOP_USER_NAME=spark`. Dataset directories belong to `spark`; ACLs also grant
+`hive` inherited read/write access to `clean` and `curated`. `/warehouse` belongs
+to `hive` and `/tmp` has sticky world-write permissions for Hadoop scratch files.
+
+The bootstrap Job creates the existing dataset contract:
+`/vietpulse/{raw,clean,curated,reference,models,checkpoints}`. Streaming checkpoints
+are separate under `checkpoints/raw-ingest`, `checkpoints/speed-sentiment-a` and
+`checkpoints/speed-sentiment-b`. Actual application tables and partitions belong
+to Task 6. The reserved `/vietpulse/.infra-checks` directory and
+`vp_infra_probe.storage_marker` external table hold infrastructure probes.
+
+### Local checks on Node 1, without workers
+
+The native smoke test starts a real NameNode, **two** DataNodes, PostgreSQL and
+Metastore with small heaps and loopback listeners. It consumes the same XML and
+startup/bootstrap/probe scripts embedded in the Kubernetes ConfigMaps, adjusting
+only addresses, temporary data paths and local resources. No K3s, Docker, sudo,
+SSH inventory, or existing database is used.
+
+Supply Java **8**, Hadoop **3.3.6**, Hive **4.0.1**, PostgreSQL **16.15** binaries,
+and PostgreSQL JDBC **42.7.8**. Obtain Apache distributions from their official
+[Hadoop archive](https://archive.apache.org/dist/hadoop/common/hadoop-3.3.6/) and
+[Hive archive](https://archive.apache.org/dist/hive/hive-4.0.1/), verifying the
+published SHA-512 checksums before extraction. The official versioned
+`apache/hive:4.0.1` image contains the matching Hadoop and Java 8 runtimes; its
+files can also supply the native test, without launching containers. PostgreSQL
+must be runnable as your normal user, including its shared libraries.
+
+Download the JDBC jar from its
+[Maven Central artifact](https://repo.maven.apache.org/maven2/org/postgresql/postgresql/42.7.8/postgresql-42.7.8.jar).
+The test checks its pinned SHA-256 before starting anything. With development
+dependencies installed, run from the repository root:
+
+```bash
+python tests/integration/storage_local_smoke.py \
+  --java-home /absolute/path/to/java8 \
+  --hadoop-home /absolute/path/to/hadoop-3.3.6 \
+  --hive-home /absolute/path/to/apache-hive-4.0.1-bin \
+  --postgres-bin /absolute/path/to/postgresql-16.15/bin \
+  --jdbc-jar /absolute/path/to/postgresql-42.7.8.jar
+```
+
+The test verifies directory creation, actual replication, byte-identical file
+round trips, PostgreSQL schema creation, catalog DDL through the remote Thrift
+API, and persistence across NameNode/DataNode and PostgreSQL/Metastore restarts.
+It stops only its own process groups on exit and retains its unique
+`/tmp/vietpulse-storage-local-*` directory with mode 0700 for inspection. Its
+random test password and generated configuration remain there; do not commit
+or share those files. Separate Hadoop PID directories allow both DataNodes to
+run on the same host.
+
+This tests storage behavior on one physical machine. It does not demonstrate
+four-node scheduling, cross-node traffic, local-path provisioning, or recovery
+from physical disk failure. Those acceptance checks remain pending until the
+other workers are available; keep the multi-node selectors and replication 2.
+
+Repository checks need no services:
+
+```bash
+python -m pytest -q
+ruff check .
+ruff format --check .
+bash -n infra/scripts/verify-storage.sh
+shellcheck -x -P SCRIPTDIR infra/scripts/verify-storage.sh
+kubectl kustomize k8s/overlays/multi-node
+```
+
+### Deploy when the four-node prerequisites pass
+
+First pass Task 2's network/storage checks and `bash infra/scripts/verify-kafka.sh`.
+Recheck measured free space before allocating the 420Gi total storage request
+for this layer (200Gi on Node 2 and 220Gi on Node 4, plus the earlier Kafka
+budget). Local-path PVC sizes do not enforce filesystem quotas.
+
+Before applying the storage base, inspect existing resources in `storage`.
+Proceed for a new deployment or a matching rerun. A different existing
+NameNode, PostgreSQL installation or Hive schema requires operator review.
+
+Provision `storage/hive-metastore-db` outside Git, with exactly these keys:
+
+```text
+username  PostgreSQL login (letters/digits/underscore; starts with letter/underscore)
+database  Metastore database (same identifier rules)
+password  Nonempty password
+```
+
+On Node 1, prepare three private files outside Git, then use their absolute paths:
+
+```bash
+sudo k3s kubectl -n storage create secret generic hive-metastore-db \
+  --from-file=username=/absolute/private/path/username \
+  --from-file=database=/absolute/private/path/database \
+  --from-file=password=/absolute/private/path/password
+sudo k3s kubectl apply -k k8s/base/storage
+bash infra/scripts/verify-storage.sh
+```
+
+Secret files must contain the literal values without trailing newlines. Reuse
+the existing Secret on reruns. Changing a PostgreSQL initialization environment
+variable does not rotate credentials in an already initialized database.
+
+The JDBC init container downloads the exact driver and verifies SHA-256. A
+second init container waits for PostgreSQL and records whether the public schema
+is empty. Metastore renders credentials into a private runtime XML file, creates
+the schema only when empty, and validates it before serving Thrift. Main-container
+restarts reuse a successfully initialized schema even if the init-container flag
+still says `empty`. Existing incompatible or partial schemas fail; no automatic
+schema upgrade is performed. The custom startup bypasses upstream shell tracing
+so passwords are not included in command lines or startup logs.
+
+NameNode formatting occurs only for a new, empty name directory. Existing
+`current/VERSION` is reused; unrecognized nonempty directories fail explicitly.
+PostgreSQL uses its official image's persistent-data initialization behavior.
+Run operations one at a time. Applying the same manifests preserves claims,
+catalog metadata and HDFS contents. The completed bootstrap Job is retained;
+to rerun directory setup, execute its idempotent script in the NameNode:
+
+```bash
+sudo k3s kubectl -n storage exec hdfs-namenode-0 -- \
+  bash /etc/hadoop/conf/bootstrap-hdfs.sh
+sudo k3s kubectl apply -k k8s/base/storage
+bash infra/scripts/verify-storage.sh
+```
+
+The verifier follows the existing literal-inventory/SSH convention and supports
+`--env-file FILE` and a host-free `--dry-run`. It checks exactly one ready pod per
+service, pinned images, placement, Bound claims, two distinct live DataNodes, replication 2,
+required directories, a fresh replicated file round trip, and catalog DDL. Each
+probe file is retained for diagnosis. Waits are bounded and failures exit nonzero.
+The metadata probe invokes the bundled Java `CliDriver` directly: Hive 4's
+top-level `hive --service cli` wrapper redirects to Beeline, which requires a
+HiveServer2 connection. The probe requires only Metastore and does not start
+another persistent service.
+
+For diagnosis on Node 1:
+
+```bash
+sudo k3s kubectl -n storage get pods,pvc -o wide
+sudo k3s kubectl -n storage get events --sort-by=.lastTimestamp
+sudo k3s kubectl -n storage logs job/hdfs-bootstrap
+sudo k3s kubectl -n storage logs deployment/hive-metastore -c metastore
+sudo k3s kubectl -n storage logs deployment/hive-metastore -c wait-postgresql
+sudo k3s kubectl -n storage exec hdfs-namenode-0 -- hdfs dfsadmin -report
+```
+
+Do not publish Secret values or generated `hive-site.xml` while sharing logs.
+Restart/failure demonstrations on the physical cluster remain part of Task 8.
+
+References: [Hadoop HDFS commands and recovery](https://hadoop.apache.org/docs/r3.3.6/hadoop-project-dist/hadoop-hdfs/HdfsUserGuide.html),
+[Hive container/JDBC setup](https://github.com/apache/hive/blob/rel/release-4.0.1/packaging/src/docker/README.md),
+[bundled metadata CLI](https://github.com/apache/hive/blob/rel/release-4.0.1/bin/ext/cli.sh),
+and [PostgreSQL container persistence](https://hub.docker.com/_/postgres).
+
+## Persistent serving databases (Task 5)
+
+The `serving` base declares one MongoDB Community replica-set member, one
+Elasticsearch node, and one Kibana instance. MCK **1.14.0** and ECK **3.5.0**
+run on Node 1 and reconcile these resources on Node 4. MongoDB **7.0.45**,
+Elasticsearch **8.19.23**, and Kibana **8.19.23** match `infra/versions.yaml`.
+
+| Workload | Node | Memory request / limit | Local-path PVC |
+| --- | --- | --- | --- |
+| MongoDB server + agent | 4 (`data=true`) | 1792Mi / 3Gi total | 40Gi data + 1Gi operator logs |
+| Elasticsearch | 4 (`data=true`) | 4Gi / 8Gi, heap 4Gi | 80Gi data |
+| Kibana | 4 (`data=true`) | 1Gi / 2Gi | Saved objects live in Elasticsearch |
+| MCK + ECK operators | 1 (`control=true`) | 256Mi / 512Mi each | None |
+
+Role keys have the `vietpulse.io/` prefix. Node 4 needs **121Gi** of new
+local-path storage, in addition to earlier Kafka and Task 4 claims. Local-path
+PVC sizes do not enforce filesystem quotas. Retain the PVCs, StatefulSets,
+custom resources, cluster names, and three Kibana encryption keys on reruns.
+MongoDB has one replica-set member, so a Node 4 or disk failure stops service;
+the PVCs alone are not backups.
+
+MongoDB uses SCRAM credentials from a Secret; its service stays internal. ECK
+generates the `elastic` password, internal TLS certificates, and Kibana
+connection credentials. Keep ECK's authentication and TLS defaults. Kibana
+saved objects are stored in Elasticsearch; stable encryption keys are required
+to read encrypted objects after a restart. There is no ingress in this task.
+Applications will be updated for Elasticsearch HTTPS/authentication in Task 6.
+
+Internal client addresses:
+
+```text
+mongodb://vietpulse-mongodb-svc.serving.svc.cluster.local:27017
+https://vietpulse-es-es-http.serving.svc.cluster.local:9200
+https://vietpulse-kibana-kb-http.serving.svc.cluster.local:5601
+```
+
+### Local checks on Node 1, without workers
+
+The native smoke test uses the same MongoDB and HTTP probe scripts as the
+Kubernetes ConfigMap. It starts the pinned MongoDB, Elasticsearch, and Kibana
+distributions on loopback with smaller local memory settings. It checks
+authenticated MongoDB majority/journal writes and reads, unauthenticated access
+rejection, Elasticsearch HTTPS indexing/search and single-node health, and
+Kibana's live Elasticsearch connection. It then restarts MongoDB,
+Elasticsearch, and Kibana separately, reading the original markers without
+rewriting them.
+
+Download official native distributions: [MongoDB 7.0.45 for Ubuntu 22.04](https://fastdl.mongodb.org/linux/mongodb-linux-x86_64-ubuntu2204-7.0.45.tgz),
+[mongosh 2.5.9](https://downloads.mongodb.com/compass/mongosh-2.5.9-linux-x64.tgz),
+[Elasticsearch 8.19.23](https://artifacts.elastic.co/downloads/elasticsearch/elasticsearch-8.19.23-linux-x86_64.tar.gz),
+and [Kibana 8.19.23](https://artifacts.elastic.co/downloads/kibana/kibana-8.19.23-linux-x86_64.tar.gz).
+Verify published checksums or release asset digests before extraction. The
+mongosh digest is pinned in `infra/versions.yaml`. Run as your normal user;
+Docker, K3s, sudo, and a live inventory are not needed. The test needs `openssl`
+and the repository's Python development dependencies.
+
+```bash
+python tests/integration/serving_local_smoke.py \
+  --mongod /absolute/path/to/mongodb/bin/mongod \
+  --mongosh /absolute/path/to/mongosh/bin/mongosh \
+  --elasticsearch-home /absolute/path/to/elasticsearch-8.19.23 \
+  --kibana-home /absolute/path/to/kibana-8.19.23
+python -m pytest tests/test_serving_deployment.py -q
+ruff check .
+ruff format --check .
+bash -n infra/scripts/verify-serving.sh
+shellcheck -x -P SCRIPTDIR infra/scripts/verify-serving.sh
+kubectl kustomize k8s/overlays/multi-node
+```
+
+The test stops only its own processes and retains a private
+`/tmp/vietpulse-serving-local-*` directory (mode 0700) with logs, data,
+generated credentials, and certificates for diagnosis. Do not publish that
+directory. Passing locally proves the database APIs and process-level
+persistence on Node 1; it cannot prove MCK/ECK reconciliation, four-node
+scheduling, local-path PVC behavior, or survival of a Node 4 failure. Those
+checks remain pending while Nodes 2-4 are unavailable.
+
+### Deploy after Tasks 2-4 pass on all four nodes
+
+Run the foundation, Kafka, and storage verifiers first. Inspect existing
+resources in `serving`; continue only for a new installation or a matching
+rerun. Install Helm 3.20.2 on Node 1. Supply two stable, private Secrets
+outside Git before applying the serving custom resources:
+
+* `serving/vietpulse-mongodb-password`: one key, `password`, containing the
+  nonempty MongoDB application password with no trailing newline.
+* `serving/vietpulse-kibana-keys`: three independent values, each at least 32
+  characters, under the exact keys `xpack.security.encryptionKey`,
+  `xpack.encryptedSavedObjects.encryptionKey`, and
+  `xpack.reporting.encryptionKey`.
+
+Create four private files with those literal values and use their absolute
+paths. Task 2 already created the `serving` namespace. The Secret creation
+commands below run only on the first installation; reuse the existing Secrets
+on matching reruns.
+Credential rotation requires a separate plan. On Node 1, from the repository
+root:
+
+```bash
+bash infra/scripts/verify-cluster.sh --check-network --check-storage
+bash infra/scripts/verify-kafka.sh
+bash infra/scripts/verify-storage.sh
+sudo k3s kubectl -n serving create secret generic vietpulse-mongodb-password \
+  --from-file=password=/absolute/private/path/mongodb-password
+sudo k3s kubectl -n serving create secret generic vietpulse-kibana-keys \
+  --from-file=xpack.security.encryptionKey=/absolute/private/path/security-key \
+  --from-file=xpack.encryptedSavedObjects.encryptionKey=/absolute/private/path/saved-objects-key \
+  --from-file=xpack.reporting.encryptionKey=/absolute/private/path/reporting-key
+source infra/scripts/lib/common.sh
+repo_root=$PWD
+sudo helm upgrade --install mongodb-kubernetes \
+  "$(version_pin serving mongodb_operator_chart)" \
+  --repo "$(version_pin serving mongodb_operator_repository)" \
+  --version "$(version_pin serving mongodb_operator_chart_version)" \
+  --kubeconfig /etc/rancher/k3s/k3s.yaml --namespace serving \
+  -f k8s/base/serving/operators/mongodb-values.yaml --wait --timeout 5m
+sudo helm upgrade --install eck-operator \
+  "$(version_pin serving elastic_operator_chart)" \
+  --repo "$(version_pin serving elastic_operator_repository)" \
+  --version "$(version_pin serving elastic_operator_chart_version)" \
+  --kubeconfig /etc/rancher/k3s/k3s.yaml --namespace serving \
+  -f k8s/base/serving/operators/eck-values.yaml --wait --timeout 5m
+sudo k3s kubectl wait --for=condition=Established --timeout=120s \
+  crd/mongodbcommunity.mongodbcommunity.mongodb.com \
+  crd/elasticsearches.elasticsearch.k8s.elastic.co \
+  crd/kibanas.kibana.k8s.elastic.co
+sudo k3s kubectl apply -k k8s/base/serving
+bash infra/scripts/verify-serving.sh
+```
+
+Run installation and verification one at a time. The `multi-node` overlay now
+contains Task 5 custom resources, so applying it during Tasks 3-4 before the
+MCK/ECK CRDs exist will fail. After both operators are installed, that overlay
+can be rendered or reapplied as a whole. Do not delete PVCs, PVs, Secret
+values, or ECK-generated resources as a retry tactic.
+
+The verifier follows the literal inventory and strict SSH conventions. It
+supports `--env-file FILE` and a host-free `--dry-run`. Live verification checks
+the pinned resource versions/images, one ready instance per service, Node 4
+placement, Bound local-path claims, internal Services, authentication, health,
+indexing/search, and Kibana status. It creates a short-lived probe Pod on Node
+1 and fresh markers in `vietpulse.infra_checks` and the
+`vietpulse-infra-serving` Elasticsearch index. The markers stay for future
+inspection. **The live verifier deliberately deletes the MongoDB Pod and then
+the Elasticsearch Pod, one at a time**, waits for each to recover, and reads
+the original markers without rewriting them. It leaves all claims intact and
+removes its own probe Pod. Run it during a demo maintenance window if clients
+are already using these single-instance databases.
+
+For diagnosis on Node 1:
+
+```bash
+sudo k3s kubectl -n serving get mongodbcommunity,elasticsearch,kibana,pods,pvc -o wide
+sudo k3s kubectl -n serving get events --sort-by=.lastTimestamp
+sudo k3s kubectl -n serving logs deployment/mongodb-kubernetes-operator
+sudo k3s kubectl -n serving logs statefulset/elastic-operator
+sudo k3s kubectl -n serving describe mongodbcommunity/vietpulse-mongodb
+sudo k3s kubectl -n serving describe elasticsearch/vietpulse-es
+sudo k3s kubectl -n serving describe kibana/vietpulse-kibana
+```
+
+Do not publish Secret values, generated credentials, or temporary probe files.
+References: [MCK Community resource samples](https://github.com/mongodb/mongodb-kubernetes/tree/master/public/samples/community),
+[ECK API 3.5.0](https://www.elastic.co/docs/reference/cloud-on-k8s/api-reference/3_5_0),
+[Kibana saved objects](https://www.elastic.co/docs/extend/kibana/key-concepts/saved-objects),
+and [Kibana encryption keys](https://www.elastic.co/docs/reference/kibana/configuration-reference/security-settings).

@@ -1,0 +1,163 @@
+# The same authenticated probes are executed by Kubernetes and the native smoke test.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: serving-probes
+data:
+  mongo-probe.js: |
+    const fs = require('fs');
+    const cfg = JSON.parse(fs.readFileSync(process.env.VP_MONGO_CONFIG, 'utf8'));
+    const connection = new Mongo(cfg.uri);
+    let rejected = false;
+    try { connection.getDB('vietpulse').getCollection('infra_checks').findOne({_id: cfg.marker}); }
+    catch (error) { if (error.code !== 13) throw error; rejected = true; }
+    if (!rejected) throw new Error('MongoDB accepted an unauthenticated read');
+    const admin = connection.getDB('admin');
+    if (!admin.auth('vietpulse', fs.readFileSync(cfg.passwordFile, 'utf8'))) {
+      throw new Error('MongoDB authentication failed');
+    }
+    const target = connection.getDB('vietpulse').getCollection('infra_checks');
+    if (!connection.getDB('admin').runCommand({hello: 1}).isWritablePrimary) {
+      throw new Error('MongoDB is not a writable replica-set primary');
+    }
+    if (cfg.write === true) {
+      target.replaceOne({_id: cfg.marker}, {_id: cfg.marker, marker: cfg.marker},
+        {upsert: true, writeConcern: {w: 'majority', j: true}});
+    }
+    const doc = target.findOne({_id: cfg.marker});
+    if (!doc || doc.marker !== cfg.marker) throw new Error('MongoDB verification document was lost or changed');
+    print(JSON.stringify({marker: doc.marker, ok: true}));
+  elastic-probe.sh: |
+    #!/bin/sh
+    set +xv
+    set -eu
+    umask 077
+    config=$(mktemp)
+    trap 'rm -f "$config"' EXIT HUP INT TERM
+    # curl config keeps the password out of process arguments and diagnostics.
+    password=$(sed 's/\\/\\\\/g; s/"/\\"/g' "$VP_ES_PASSWORD_FILE")
+    printf 'user = "%s:%s"\n' "${VP_ES_USERNAME:-elastic}" "$password" > "$config"
+    unset password
+    request() { curl --silent --show-error --fail --connect-timeout 5 --max-time 45 \
+      --config "$config" --cacert "$VP_ES_CA" -H 'Content-Type: application/json' "$@"; }
+    case "$1" in
+      unauth)
+        code=$(curl --silent --show-error --connect-timeout 5 --max-time 15 --cacert "$VP_ES_CA" \
+          --output /dev/null --write-out '%{http_code}' "$VP_ES_URL/_security/_authenticate")
+        [ "$code" = 401 ] || { echo 'Elasticsearch accepted an unauthenticated request' >&2; exit 1; }
+        printf '{"unauthenticatedRejected":true}'
+        ;;
+      write)
+        request -X PUT "$VP_ES_URL/vietpulse-infra-serving/_doc/$2?refresh=wait_for" \
+          --data-binary "{\"marker\":\"$2\"}"
+        ;;
+      document) request "$VP_ES_URL/vietpulse-infra-serving/_doc/$2" ;;
+      search) request "$VP_ES_URL/vietpulse-infra-serving/_search" \
+          --data-binary "{\"query\":{\"ids\":{\"values\":[\"$2\"]}}}" ;;
+      health) request "$VP_ES_URL/_cluster/health?wait_for_status=yellow&wait_for_no_initializing_shards=true&timeout=30s" ;;
+      kibana) curl --silent --show-error --fail --connect-timeout 5 --max-time 45 \
+          --config "$config" --cacert "$VP_KIBANA_CA" "$VP_KIBANA_URL/api/status" ;;
+      *) echo 'Unknown serving probe' >&2; exit 1 ;;
+    esac
+---
+# https://github.com/mongodb/mongodb-kubernetes/tree/master/public/samples/community
+apiVersion: mongodbcommunity.mongodb.com/v1
+kind: MongoDBCommunity
+metadata:
+  name: vietpulse-mongodb
+spec:
+  members: 1
+  type: ReplicaSet
+  version: "7.0.45"
+  security:
+    authentication:
+      modes: [SCRAM]
+  users:
+    - name: vietpulse
+      db: admin
+      passwordSecretRef: {name: vietpulse-mongodb-password}
+      scramCredentialsSecretName: vietpulse-mongodb-user
+      roles: [{name: readWrite, db: vietpulse}]
+  additionalMongodConfig:
+    storage.wiredTiger.engineConfig.cacheSizeGB: 1
+  statefulSet:
+    spec:
+      persistentVolumeClaimRetentionPolicy: {whenDeleted: Retain, whenScaled: Retain}
+      template:
+        metadata:
+          labels: {vietpulse.io/component: mongodb}
+        spec:
+          nodeSelector: {vietpulse.io/data: "true"}
+          containers:
+            - name: mongod
+              resources:
+                requests: {cpu: 250m, memory: 1536Mi}
+                limits: {cpu: "2", memory: 2560Mi}
+            - name: mongodb-agent
+              resources:
+                requests: {cpu: 100m, memory: 256Mi}
+                limits: {cpu: 500m, memory: 512Mi}
+      volumeClaimTemplates:
+        - metadata: {name: data-volume}
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: local-path
+            resources: {requests: {storage: 40Gi}}
+        - metadata: {name: logs-volume}
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: local-path
+            resources: {requests: {storage: 1Gi}}
+---
+# ECK manages discovery, credentials and TLS. Do not override its managed settings.
+# https://www.elastic.co/docs/reference/cloud-on-k8s/api-reference/3_5_0
+apiVersion: elasticsearch.k8s.elastic.co/v1
+kind: Elasticsearch
+metadata:
+  name: vietpulse-es
+spec:
+  version: "8.19.23"
+  volumeClaimDeletePolicy: DeleteOnScaledownOnly
+  nodeSets:
+    - name: data
+      count: 1
+      config:
+        node.store.allow_mmap: false
+      podTemplate:
+        metadata:
+          labels: {vietpulse.io/component: elasticsearch}
+        spec:
+          nodeSelector: {vietpulse.io/data: "true"}
+          containers:
+            - name: elasticsearch
+              env: [{name: ES_JAVA_OPTS, value: -Xms4g -Xmx4g}]
+              resources:
+                requests: {cpu: 500m, memory: 4Gi}
+                limits: {cpu: "4", memory: 8Gi}
+      volumeClaimTemplates:
+        - metadata: {name: elasticsearch-data}
+          spec:
+            accessModes: [ReadWriteOnce]
+            storageClassName: local-path
+            resources: {requests: {storage: 80Gi}}
+---
+apiVersion: kibana.k8s.elastic.co/v1
+kind: Kibana
+metadata:
+  name: vietpulse-kibana
+spec:
+  version: "8.19.23"
+  count: 1
+  elasticsearchRef: {name: vietpulse-es}
+  secureSettings:
+    - secretName: vietpulse-kibana-keys
+  podTemplate:
+    metadata:
+      labels: {vietpulse.io/component: kibana}
+    spec:
+      nodeSelector: {vietpulse.io/data: "true"}
+      containers:
+        - name: kibana
+          resources:
+            requests: {cpu: 250m, memory: 1Gi}
+            limits: {cpu: "2", memory: 2Gi}

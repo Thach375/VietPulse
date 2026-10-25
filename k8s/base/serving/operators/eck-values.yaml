@@ -1,0 +1,7 @@
+# Chart eck-operator 3.5.0; the operator and its managed resources share serving.
+managedNamespaces: [serving]
+nodeSelector: {vietpulse.io/control: "true"}
+replicaCount: 1
+resources:
+  requests: {cpu: 100m, memory: 256Mi}
+  limits: {cpu: "1", memory: 512Mi}
