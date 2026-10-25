@@ -41,7 +41,7 @@ data:
     #!/usr/bin/env bash
     set -euo pipefail
     timeout 180 hdfs dfsadmin -safemode wait
-    for directory in raw clean curated reference models checkpoints checkpoints/raw-ingest checkpoints/speed-sentiment-a checkpoints/speed-sentiment-b; do
+    for directory in raw clean curated reference models checkpoints checkpoints/raw-ingest checkpoints/speed-sentiment-a checkpoints/speed-sentiment-b checkpoints/speed-sentiment-b-dedup checkpoints/speed-sentiment-dedup-output; do
       hdfs dfs -mkdir -p "/vietpulse/$directory"
       hdfs dfs -chown spark:supergroup "/vietpulse/$directory"
       hdfs dfs -chmod 775 "/vietpulse/$directory"
@@ -61,7 +61,7 @@ data:
     set -euo pipefail
     timeout 180 hdfs dfsadmin -safemode wait
     [[ $(hdfs getconf -confKey dfs.replication) == 2 ]]
-    for directory in raw clean curated reference models checkpoints/raw-ingest checkpoints/speed-sentiment-a checkpoints/speed-sentiment-b; do
+    for directory in raw clean curated reference models checkpoints/raw-ingest checkpoints/speed-sentiment-a checkpoints/speed-sentiment-b checkpoints/speed-sentiment-b-dedup checkpoints/speed-sentiment-dedup-output; do
       hdfs dfs -test -d "/vietpulse/$directory"
     done
     # A reserved probe directory keeps synthetic records outside dataset partitions.

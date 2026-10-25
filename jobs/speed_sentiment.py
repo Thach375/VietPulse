@@ -20,6 +20,7 @@ from common.spark_processing import (
     parse_kafka_records,
 )
 from jobs.es_http import bulk_index_partition
+from jobs.speed_window import WindowConfig, start_dedup_query, start_window_query
 
 LOGGER = logging.getLogger(__name__)
 
@@ -36,6 +37,12 @@ class JobConfig:
     docs_index: str = "vp-docs"
     dlq_index: str = "vp-dlq"
     available_now: bool = False
+    enable_windows: bool = False
+    dedup_output_path: str = WindowConfig.output_path
+    dedup_checkpoint: str = WindowConfig.dedup_checkpoint
+    window_checkpoint: str = WindowConfig.window_checkpoint
+    mongo_uri: str = WindowConfig.mongo_uri
+    mongo_password_file: str = WindowConfig.mongo_password_file
 
     def __post_init__(self):
         if not self.checkpoint_location.strip():
@@ -49,6 +56,18 @@ class JobConfig:
             raise ValueError("es_url phải là http(s)://host[:port]")
         if target.username or target.password or target.query or target.fragment:
             raise ValueError("es_url không chứa thông tin đăng nhập, query hay fragment")
+        if self.enable_windows:
+            self.window_config()
+
+    def window_config(self) -> WindowConfig:
+        return WindowConfig(
+            output_path=self.dedup_output_path,
+            dedup_checkpoint=self.dedup_checkpoint,
+            window_checkpoint=self.window_checkpoint,
+            mongo_uri=self.mongo_uri,
+            mongo_password_file=self.mongo_password_file,
+            available_now=self.available_now,
+        )
 
 
 def write_documents(documents: DataFrame, config: JobConfig):
@@ -89,9 +108,8 @@ def process_batch(records: DataFrame, batch_id: int, config: JobConfig):
         parsed.unpersist()
 
 
-def start_query(spark: SparkSession, config: JobConfig):
-    spark.conf.set("spark.sql.session.timeZone", "UTC")
-    records = (
+def read_records(spark: SparkSession, config: JobConfig):
+    return (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", config.bootstrap_servers)
         .option("subscribe", ",".join(config.topics))
@@ -100,6 +118,11 @@ def start_query(spark: SparkSession, config: JobConfig):
         .option("maxOffsetsPerTrigger", config.max_offsets_per_trigger)
         .load()
     )
+
+
+def start_query(spark: SparkSession, config: JobConfig):
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    records = read_records(spark, config)
     writer = (
         records.writeStream.queryName("speed-sentiment-documents")
         .outputMode("append")
@@ -128,6 +151,12 @@ def parse_args(argv=None):
     parser.add_argument(
         "--available-now", action="store_true", help="xử lý backlog rồi thoát, giữ checkpoint để chạy tiếp"
     )
+    parser.add_argument("--enable-windows", action="store_true")
+    parser.add_argument("--dedup-output-path", default=WindowConfig.output_path)
+    parser.add_argument("--dedup-checkpoint", default=WindowConfig.dedup_checkpoint)
+    parser.add_argument("--window-checkpoint", default=WindowConfig.window_checkpoint)
+    parser.add_argument("--mongo-uri", default=WindowConfig.mongo_uri)
+    parser.add_argument("--mongo-password-file", default=WindowConfig.mongo_password_file)
     args = vars(parser.parse_args(argv))
     args["topics"] = tuple(topic.strip() for topic in args["topics"].split(",") if topic.strip())
     return JobConfig(**args)
@@ -137,9 +166,30 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     config = parse_args()
     spark = SparkSession.builder.appName("vietpulse-speed-sentiment").getOrCreate()
+    spark.conf.set("spark.sql.session.timeZone", "UTC")
+    queries = []
     try:
-        start_query(spark, config).awaitTermination()
+        documents = start_query(spark, config)
+        queries.append(documents)
+        if config.enable_windows:
+            window_config = config.window_config()
+            dedup = start_dedup_query(read_records(spark, config), window_config)
+            queries.append(dedup)
+            if config.available_now:
+                documents.awaitTermination()
+                dedup.awaitTermination()
+            windows = start_window_query(spark, window_config)
+            queries.append(windows)
+        if config.available_now:
+            for query in queries:
+                query.awaitTermination()
+        else:
+            spark.streams.awaitAnyTermination()
+            raise RuntimeError("A continuous speed-sentiment query terminated unexpectedly")
     finally:
+        for query in queries:
+            if query.isActive:
+                query.stop()
         spark.stop()
 
 
